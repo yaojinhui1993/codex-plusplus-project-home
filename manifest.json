@@ -1,9 +1,9 @@
 {
   "id": "co.bennett.project-home",
   "name": "Project Home",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "githubRepo": "b-nnett/codex-plusplus-project-home",
-  "description": "Adds a hover home button to every sidebar project row and opens a lightweight Project Home view.",
+  "description": "Adds a Project Home kanban board with per-project Linear-style issues.",
   "author": {
     "name": "bennett",
     "url": "https://github.com/anomalyco/codex-plusplus"
@@ -11,8 +11,16 @@
   "tags": [
     "ui",
     "projects",
-    "productivity"
+    "productivity",
+    "kanban",
+    "mcp"
   ],
-  "scope": "renderer",
-  "main": "index.js"
+  "scope": "both",
+  "main": "index.js",
+  "mcp": {
+    "command": "node",
+    "args": [
+      "mcp-server.js"
+    ]
+  }
 }
