@@ -248,6 +248,10 @@ function installStyle() {
       color: var(--color-token-text-primary, var(--color-foreground, #111));
     }
 
+    [${VIEW_ATTR}="host"] {
+      border-top-color: transparent !important;
+    }
+
     [${VIEW_ATTR}="scroll"] {
       flex: 1;
       min-height: 0;
