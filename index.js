@@ -4484,6 +4484,10 @@ function handleRouteChange(state) {
       state.board = null;
       state.boardError = "";
     }
+    if (!changed && state.editor) {
+      if (!state.board) loadProjectHomeBoard(state, routeProject);
+      return;
+    }
     renderProjectHomeView(state);
     if (changed || !state.board) loadProjectHomeBoard(state, routeProject);
     return;
