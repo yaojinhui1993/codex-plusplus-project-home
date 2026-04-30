@@ -1958,7 +1958,6 @@ function restoreProjectHomeEditorFocus(root, snapshot) {
   };
   restore();
   window.requestAnimationFrame(restore);
-  for (const delay of [0, 16, 60, 140, 300]) window.setTimeout(restore, delay);
 }
 
 function renderProjectHomeError(message) {
@@ -3002,7 +3001,7 @@ function renderIssueEditor(state) {
   panel.append(form);
   backdrop.append(panel);
 
-  focusIssueTitleInput(titleInput, { select: !isEdit, sticky: !isEdit });
+  focusIssueTitleInput(titleInput, { select: !isEdit });
 
   return backdrop;
 }
@@ -3012,16 +3011,7 @@ function focusIssueTitleInput(input, options = {}) {
   let didSelect = false;
   const focus = () => {
     if (!input.isConnected) return;
-    const editor = input.closest(`[${VIEW_ATTR}="editor-panel"]`);
-    if (
-      options.sticky &&
-      document.activeElement instanceof HTMLElement &&
-      editor instanceof HTMLElement &&
-      editor.contains(document.activeElement) &&
-      document.activeElement !== input
-    ) {
-      return;
-    }
+    if (document.activeElement === input) return;
     input.focus({ preventScroll: true });
     if (options.select && !didSelect) {
       input.select();
@@ -3030,9 +3020,6 @@ function focusIssueTitleInput(input, options = {}) {
   };
   focus();
   window.requestAnimationFrame(focus);
-  for (const delay of [0, 16, 60, 140, 300, 700, 1200, 2000, 3500]) {
-    window.setTimeout(focus, delay);
-  }
 }
 
 function createStatusChip(state, value) {
