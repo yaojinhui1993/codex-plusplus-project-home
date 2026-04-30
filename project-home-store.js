@@ -62,6 +62,7 @@ function createIssueStore(options = {}) {
         assignee: values.assignee,
         dueDate: values.dueDate,
         comments: normalizeComments(values.comments),
+        linear: normalizeLinear(input.linear),
         rank: nextRank(db, status),
         createdAt: now,
         updatedAt: now,
@@ -97,6 +98,9 @@ function createIssueStore(options = {}) {
       }
       if (Object.prototype.hasOwnProperty.call(patch, "comments")) {
         issue.comments = normalizeComments(patch.comments);
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, "linear")) {
+        issue.linear = normalizeLinear(patch.linear);
       }
       appendComment(issue, patch.newComment || patch.comment, undefined, patch.newCommentAuthor || patch.commentAuthor);
       if (Object.prototype.hasOwnProperty.call(patch, "status")) {
@@ -150,6 +154,16 @@ function createIssueStore(options = {}) {
       const issue = db.issues.find((item) => item.id === issueId);
       if (!issue) return null;
       appendComment(issue, body, undefined, author);
+      issue.updatedAt = new Date().toISOString();
+      writeProjectDb(issuesDir, db);
+      return { issue, board: publicBoard(db) };
+    },
+
+    setLinear(projectPath, issueId, linear = {}) {
+      const db = readProjectDb(issuesDir, projectPath, issueDefaults);
+      const issue = db.issues.find((item) => item.id === issueId);
+      if (!issue) return null;
+      issue.linear = normalizeLinear({ ...(issue.linear || {}), ...linear });
       issue.updatedAt = new Date().toISOString();
       writeProjectDb(issuesDir, db);
       return { issue, board: publicBoard(db) };
@@ -220,6 +234,7 @@ function normalizeIssue(issue) {
     assignee: cleanText(issue.assignee),
     dueDate: normalizeDueDate(issue.dueDate),
     comments: normalizeComments(issue.comments),
+    linear: normalizeLinear(issue.linear),
     rank: Number.isFinite(Number(issue.rank)) ? Number(issue.rank) : 0,
     createdAt: cleanText(issue.createdAt) || now,
     updatedAt: cleanText(issue.updatedAt) || now,
@@ -331,6 +346,18 @@ function normalizeComments(comments) {
     })
     .filter(Boolean)
     .slice(0, 100);
+}
+
+function normalizeLinear(linear) {
+  if (!linear || typeof linear !== "object") return {};
+  const result = {
+    id: cleanText(linear.id),
+    identifier: cleanText(linear.identifier),
+    url: cleanText(linear.url),
+    syncedAt: cleanText(linear.syncedAt),
+    lastError: cleanText(linear.lastError),
+  };
+  return Object.fromEntries(Object.entries(result).filter(([, value]) => value));
 }
 
 function appendComment(issue, body, createdAt = new Date().toISOString(), author = "") {

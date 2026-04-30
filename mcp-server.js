@@ -110,6 +110,8 @@ function callTool(name, args) {
       ));
     case "project_home_delete_issue":
       return content(store.delete(projectPath, requireString(args.issueId, "issueId")));
+    case "project_home_linear_sync":
+      return syncLinear(projectPath, args).then(content);
     case "project_home_columns":
       return content({
         columns: DEFAULT_COLUMNS,
@@ -170,6 +172,21 @@ function tools() {
             description: "Optional tool name (with or without the `project_home_` prefix) to get focused help.",
           },
         },
+      },
+    },
+    {
+      name: "project_home_linear_sync",
+      description: "Push Project Home issues to Linear and persist Linear ids on local issues.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectPath,
+          issueId: { type: "string", description: "Optional single issue id to sync. Omit to sync all issues." },
+          teamId: { type: "string", description: "Linear team UUID. Defaults to LINEAR_TEAM_ID." },
+          apiKey: { type: "string", description: "Linear API key. Defaults to LINEAR_API_KEY or LINEAR_ACCESS_TOKEN." },
+          dryRun: { type: "boolean", default: false, description: "When true, report planned creates/updates without writing Linear or local metadata." },
+        },
+        required: ["projectPath"],
       },
     },
     {
@@ -297,6 +314,7 @@ function helpText(toolName) {
       "- project_home_add_comment   append a single comment.",
       "- project_home_move_issue    change an issue's status (and optional ordering).",
       "- project_home_delete_issue  remove an issue.",
+      "- project_home_linear_sync   push local Project Home issues to Linear.",
       "",
       "Call `project_home_help` with `tool: \"<name>\"` for argument-level details.",
     ].join("\n"),
@@ -385,6 +403,23 @@ function helpText(toolName) {
       "  issueId     (required).",
       "Returns: { issue, board }, or null if the issue does not exist.",
     ].join("\n"),
+
+    project_home_linear_sync: [
+      "project_home_linear_sync",
+      "Args:",
+      "  projectPath (required).",
+      "  issueId     (optional) — sync only one local issue.",
+      "  teamId      (optional) — Linear team UUID; defaults to LINEAR_TEAM_ID.",
+      "  apiKey      (optional) — Linear API key; defaults to LINEAR_API_KEY or LINEAR_ACCESS_TOKEN.",
+      "  dryRun      (boolean)  — report planned creates/updates without writing.",
+      "Behavior:",
+      "  Creates Linear issues for local issues without linear.id.",
+      "  Updates Linear issues for local issues with linear.id.",
+      "  Persists { id, identifier, url, syncedAt } under issue.linear after successful writes.",
+      "  Maps Project Home statuses to Linear workflow states by normalized name when possible.",
+      "  Maps priorities urgent/high/medium/low/none to Linear priority values 1/2/3/4/0.",
+      "Returns: { dryRun, teamId, synced[], failed[], board }.",
+    ].join("\n"),
   };
 
   if (!toolName) return sections.overview;
@@ -393,6 +428,218 @@ function helpText(toolName) {
   if (sections[fullKey]) return sections[fullKey];
   if (sections[key]) return sections[key];
   return `Unknown tool "${toolName}". Call project_home_help with no arguments to list available tools.`;
+}
+
+async function syncLinear(projectPath, args = {}) {
+  const apiKey = requireLinearApiKey(args);
+  const teamId = requireString(args.teamId || process.env.LINEAR_TEAM_ID, "teamId");
+  const dryRun = Boolean(args.dryRun);
+  const board = store.list(projectPath);
+  const issues = board.issues.filter((issue) => !args.issueId || issue.id === args.issueId);
+  if (args.issueId && issues.length === 0) throw new Error(`Issue not found: ${args.issueId}`);
+
+  const client = createLinearClient(apiKey, args.apiUrl || process.env.LINEAR_API_URL);
+  const states = await client.teamStates(teamId);
+  const synced = [];
+  const failed = [];
+
+  for (const issue of issues) {
+    const planned = {
+      issueId: issue.id,
+      action: issue.linear?.id ? "update" : "create",
+      linearId: issue.linear?.id || "",
+      title: issue.title,
+    };
+    if (dryRun) {
+      synced.push(planned);
+      continue;
+    }
+    try {
+      const input = linearIssueInput(issue, teamId, states);
+      const linearIssue = issue.linear?.id
+        ? await client.updateIssue(issue.linear.id, input)
+        : await client.createIssue(input);
+      const syncedAt = new Date().toISOString();
+      const patch = {
+        id: linearIssue.id,
+        identifier: linearIssue.identifier,
+        url: linearIssue.url,
+        syncedAt,
+        lastError: "",
+      };
+      store.setLinear(projectPath, issue.id, patch);
+      synced.push({ ...planned, ...patch });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      store.setLinear(projectPath, issue.id, {
+        ...(issue.linear || {}),
+        lastError: message,
+        syncedAt: new Date().toISOString(),
+      });
+      failed.push({ ...planned, error: message });
+    }
+  }
+
+  return { dryRun, teamId, synced, failed, board: store.list(projectPath) };
+}
+
+function requireLinearApiKey(args = {}) {
+  const key = String(args.apiKey || process.env.LINEAR_API_KEY || process.env.LINEAR_ACCESS_TOKEN || "").trim();
+  if (!key) throw new Error("apiKey is required (or set LINEAR_API_KEY / LINEAR_ACCESS_TOKEN)");
+  return key;
+}
+
+function linearIssueInput(issue, teamId, states) {
+  const input = {
+    teamId,
+    title: String(issue.title || "Untitled issue"),
+    description: linearDescription(issue),
+    priority: linearPriority(issue.priority),
+  };
+  const stateId = linearStateId(issue.status, states);
+  if (stateId) input.stateId = stateId;
+  if (issue.dueDate) input.dueDate = issue.dueDate;
+  return input;
+}
+
+function linearDescription(issue) {
+  const parts = [];
+  if (issue.description) parts.push(issue.description);
+  parts.push(`\nSynced from Project Home issue ${issue.id}.`);
+  if (Array.isArray(issue.labels) && issue.labels.length) {
+    parts.push(`Labels: ${issue.labels.join(", ")}`);
+  }
+  if (issue.assignee) parts.push(`Assignee: ${issue.assignee}`);
+  if (Array.isArray(issue.comments) && issue.comments.length) {
+    parts.push("\nProject Home comments:");
+    for (const comment of issue.comments.slice(-10)) {
+      const author = comment.author ? `${comment.author}: ` : "";
+      parts.push(`- ${author}${comment.body}`);
+    }
+  }
+  return parts.join("\n");
+}
+
+function linearPriority(priority) {
+  return ({ urgent: 1, high: 2, medium: 3, low: 4, none: 0 })[String(priority || "none").toLowerCase()] ?? 0;
+}
+
+function linearStateId(status, states) {
+  const aliases = {
+    backlog: ["backlog", "triage"],
+    todo: ["todo", "to do", "planned", "unstarted"],
+    in_progress: ["in_progress", "in progress", "started"],
+    in_review: ["in_review", "in review", "review"],
+    done: ["done", "completed", "complete"],
+  }[String(status || "").toLowerCase()] || [];
+  const normalized = new Set(aliases.map(normalizeLinearName));
+  const found = states.find((state) => normalized.has(normalizeLinearName(state.name)));
+  return found?.id || "";
+}
+
+function normalizeLinearName(value) {
+  return String(value || "").toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function createLinearClient(apiKey, apiUrl = "https://api.linear.app/graphql") {
+  const endpoint = String(apiUrl || "").trim() || "https://api.linear.app/graphql";
+  if (endpoint === "mock://linear") return createMockLinearClient();
+  const authorization = /^lin_oauth_/i.test(apiKey) ? `Bearer ${apiKey}` : apiKey;
+  async function request(query, variables = {}) {
+    if (typeof fetch !== "function") throw new Error("Linear sync requires Node.js 18+ fetch support");
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: authorization,
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+    const text = await response.text();
+    let payload;
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error(`Linear returned non-JSON response (${response.status})`);
+    }
+    if (!response.ok) throw new Error(`Linear HTTP ${response.status}: ${payload.errors?.[0]?.message || text}`);
+    if (Array.isArray(payload.errors) && payload.errors.length) {
+      throw new Error(payload.errors.map((error) => error.message).join("; "));
+    }
+    return payload.data || {};
+  }
+
+  return {
+    async teamStates(teamId) {
+      const data = await request(`
+        query ProjectHomeTeamStates($teamId: String!) {
+          team(id: $teamId) {
+            states {
+              nodes { id name type }
+            }
+          }
+        }
+      `, { teamId });
+      return data.team?.states?.nodes || [];
+    },
+    async createIssue(input) {
+      const data = await request(`
+        mutation ProjectHomeCreateIssue($input: IssueCreateInput!) {
+          issueCreate(input: $input) {
+            success
+            issue { id identifier url title updatedAt }
+          }
+        }
+      `, { input });
+      const issue = data.issueCreate?.issue;
+      if (!data.issueCreate?.success || !issue?.id) throw new Error("Linear issueCreate did not return an issue");
+      return issue;
+    },
+    async updateIssue(id, input) {
+      const { teamId, ...patch } = input;
+      const data = await request(`
+        mutation ProjectHomeUpdateIssue($id: String!, $input: IssueUpdateInput!) {
+          issueUpdate(id: $id, input: $input) {
+            success
+            issue { id identifier url title updatedAt }
+          }
+        }
+      `, { id, input: patch });
+      const issue = data.issueUpdate?.issue;
+      if (!data.issueUpdate?.success || !issue?.id) throw new Error("Linear issueUpdate did not return an issue");
+      return issue;
+    },
+  };
+}
+
+function createMockLinearClient() {
+  return {
+    async teamStates() {
+      return [
+        { id: "state-todo", name: "Todo", type: "unstarted" },
+        { id: "state-progress", name: "In Progress", type: "started" },
+        { id: "state-done", name: "Done", type: "completed" },
+      ];
+    },
+    async createIssue(input) {
+      return {
+        id: "lin-created-1",
+        identifier: "LIN-1",
+        url: "https://linear.app/acme/issue/LIN-1",
+        title: input.title,
+        updatedAt: new Date().toISOString(),
+      };
+    },
+    async updateIssue(id, input) {
+      return {
+        id,
+        identifier: "LIN-1",
+        url: "https://linear.app/acme/issue/LIN-1",
+        title: input.title,
+        updatedAt: new Date().toISOString(),
+      };
+    },
+  };
 }
 
 function respond(message) {

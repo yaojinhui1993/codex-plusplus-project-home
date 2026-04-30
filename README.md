@@ -12,6 +12,7 @@ V1 includes a per-project kanban board for Linear-style issues:
 
 The tweak also includes `mcp-server.js`, a stdio MCP server backed by the same issue store. Tools:
 
+- `project_home_help` — self-documenting; pass `tool: "<name>"` for focused help
 - `project_home_columns`
 - `project_home_list_issues`
 - `project_home_get_issue`
@@ -20,6 +21,9 @@ The tweak also includes `mcp-server.js`, a stdio MCP server backed by the same i
 - `project_home_add_comment`
 - `project_home_move_issue`
 - `project_home_delete_issue`
+- `project_home_linear_sync`
+
+Agents unfamiliar with the server can call `project_home_help` (no arguments) to discover available tools, status/priority enums, and the `author: "Codex"` convention.
 
 Issue ids use a per-project prefix derived from the first 2–3 alphanumeric characters of the project folder name (e.g. issues under `…/tweaks/` become `TWE-1`, `TWE-2`, …). Existing `PH-*` ids are preserved.
 
@@ -37,7 +41,20 @@ args = ["/ABSOLUTE/PATH/TO/codex-plusplus/tweaks/co.bennett.project-home/mcp-ser
 
 On macOS the absolute path is typically `/Users/<you>/Library/Application Support/codex-plusplus/tweaks/co.bennett.project-home/mcp-server.js`.
 
-To verify, ask Codex "what MCPs can you see?" — `project-home` should appear with the eight `project_home_*` tools. Once upstream Codex++ auto-registers MCP entries from tweak manifests, this manual step can go away.
+To verify, ask Codex "what MCPs can you see?" — `project-home` should appear with the ten `project_home_*` tools. Once upstream Codex++ auto-registers MCP entries from tweak manifests, this manual step can go away.
+
+## Linear sync
+
+`project_home_linear_sync` pushes Project Home issues to Linear through Linear's GraphQL API. Set:
+
+```bash
+export LINEAR_API_KEY="lin_api_..."
+export LINEAR_TEAM_ID="<team uuid>"
+```
+
+Then call the MCP tool with `projectPath`. Pass `issueId` to sync one issue or omit it to sync all issues in the project. Pass `dryRun: true` to preview creates/updates without writing to Linear or local issue metadata.
+
+After a successful write, the local issue stores `linear.id`, `linear.identifier`, `linear.url`, and `linear.syncedAt`. Later syncs update that Linear issue instead of creating a duplicate.
 
 > Note: Codex's Rust MCP transport speaks newline-delimited JSON (NDJSON) on stdio, not LSP-style `Content-Length` framing. `mcp-server.js` writes one JSON message per line accordingly.
 
@@ -89,3 +106,11 @@ other section of `config.toml`.
 ````
 
 After the restart, ask Codex "what MCPs can you see?" — `project_home` should appear in the list.
+
+## Tests
+
+```bash
+npm test
+```
+
+Runs `tests/mcp.test.js`, an end-to-end smoke test that spawns `mcp-server.js`, drives every tool over stdio (NDJSON JSON-RPC), and asserts the MCP issue and Linear sync paths. The test uses `CODEX_PLUSPLUS_DATA_DIR` to point at a temp directory, so your real issue DB is never touched. No external dependencies — Node >= 18 is enough.
