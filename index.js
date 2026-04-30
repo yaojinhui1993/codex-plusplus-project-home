@@ -1880,6 +1880,7 @@ function renderProjectHomeView(state) {
     state.view = root;
   }
 
+  const focusSnapshot = captureProjectHomeEditorFocus(root);
   root.replaceChildren();
 
   const scroll = document.createElement("div");
@@ -1909,7 +1910,55 @@ function renderProjectHomeView(state) {
 
   scroll.append(contentBlock);
   root.append(scroll);
+  restoreProjectHomeEditorFocus(root, focusSnapshot);
   scheduleProjectHomeMounts(state, project, token);
+}
+
+function captureProjectHomeEditorFocus(root) {
+  const active = document.activeElement;
+  if (!(root instanceof HTMLElement) || !(active instanceof HTMLElement) || !root.contains(active)) return null;
+  if (!active.closest(`[${VIEW_ATTR}="editor-panel"]`)) return null;
+  const name = active.getAttribute("name") || "";
+  if (!name) return null;
+  const snapshot = {
+    name,
+    selectionStart: null,
+    selectionEnd: null,
+  };
+  if (
+    active instanceof HTMLInputElement ||
+    active instanceof HTMLTextAreaElement
+  ) {
+    snapshot.selectionStart = active.selectionStart;
+    snapshot.selectionEnd = active.selectionEnd;
+  }
+  return snapshot;
+}
+
+function restoreProjectHomeEditorFocus(root, snapshot) {
+  if (!snapshot?.name || !(root instanceof HTMLElement)) return;
+  const restore = () => {
+    if (!root.isConnected) return;
+    const editor = root.querySelector(`[${VIEW_ATTR}="editor-panel"]`);
+    if (!(editor instanceof HTMLElement)) return;
+    if (document.activeElement instanceof HTMLElement && editor.contains(document.activeElement)) return;
+    const field = Array.from(editor.querySelectorAll("input, textarea, select"))
+      .find((node) => node instanceof HTMLElement && node.getAttribute("name") === snapshot.name);
+    if (!(field instanceof HTMLElement)) return;
+    field.focus({ preventScroll: true });
+    if (
+      (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) &&
+      typeof snapshot.selectionStart === "number" &&
+      typeof snapshot.selectionEnd === "number"
+    ) {
+      try {
+        field.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+      } catch {}
+    }
+  };
+  restore();
+  window.requestAnimationFrame(restore);
+  for (const delay of [0, 16, 60, 140, 300]) window.setTimeout(restore, delay);
 }
 
 function renderProjectHomeError(message) {
@@ -2953,21 +3002,37 @@ function renderIssueEditor(state) {
   panel.append(form);
   backdrop.append(panel);
 
-  focusIssueTitleInput(titleInput, { select: !isEdit });
+  focusIssueTitleInput(titleInput, { select: !isEdit, sticky: !isEdit });
 
   return backdrop;
 }
 
 function focusIssueTitleInput(input, options = {}) {
   if (!(input instanceof HTMLInputElement)) return;
+  let didSelect = false;
   const focus = () => {
     if (!input.isConnected) return;
+    const editor = input.closest(`[${VIEW_ATTR}="editor-panel"]`);
+    if (
+      options.sticky &&
+      document.activeElement instanceof HTMLElement &&
+      editor instanceof HTMLElement &&
+      editor.contains(document.activeElement) &&
+      document.activeElement !== input
+    ) {
+      return;
+    }
     input.focus({ preventScroll: true });
-    if (options.select) input.select();
+    if (options.select && !didSelect) {
+      input.select();
+      didSelect = true;
+    }
   };
   focus();
   window.requestAnimationFrame(focus);
-  for (const delay of [0, 16, 60, 140]) window.setTimeout(focus, delay);
+  for (const delay of [0, 16, 60, 140, 300, 700, 1200, 2000, 3500]) {
+    window.setTimeout(focus, delay);
+  }
 }
 
 function createStatusChip(state, value) {
