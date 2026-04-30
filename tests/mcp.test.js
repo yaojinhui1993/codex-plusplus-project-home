@@ -10,6 +10,7 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { createIssueStore } = require("../project-home-store");
 
 const SERVER = path.resolve(__dirname, "..", "mcp-server.js");
 
@@ -28,7 +29,6 @@ async function startServers() {
       ...process.env,
       CODEX_PLUSPLUS_DATA_DIR: dataDir,
       LINEAR_API_KEY: "lin_api_test",
-      LINEAR_TEAM_ID: "team-test",
       LINEAR_API_URL: "mock://linear",
     },
     stdio: ["pipe", "pipe", "inherit"],
@@ -77,9 +77,10 @@ function check(label, cond, detail = "") {
     check("initialize returns serverInfo", init.serverInfo?.name === "project-home");
 
     const list = await send("tools/list", {});
-    check("tools/list returns 10 tools", Array.isArray(list.tools) && list.tools.length === 10, `got ${list.tools?.length}`);
+    check("tools/list returns 11 tools", Array.isArray(list.tools) && list.tools.length === 11, `got ${list.tools?.length}`);
     const toolNames = (list.tools || []).map((t) => t.name);
     check("tools/list includes project_home_help", toolNames.includes("project_home_help"));
+    check("tools/list includes project_home_search_issues", toolNames.includes("project_home_search_issues"));
     check("tools/list includes project_home_linear_sync", toolNames.includes("project_home_linear_sync"));
 
     // Help tool: overview
@@ -126,6 +127,15 @@ function check(label, cond, detail = "") {
     const created2 = await call("project_home_create_issue", { projectPath, title: "Second" });
     check("second issue increments", created2.issue.id === `${PFX}-2`);
 
+    const searchTitle = await call("project_home_search_issues", { projectPath, query: "first" });
+    check("search matches title", searchTitle.issues.length === 1 && searchTitle.issues[0].id === `${PFX}-1`);
+
+    const searchLabel = await call("project_home_search_issues", { projectPath, query: "urgent-ui" });
+    check("search matches label", searchLabel.issues.length === 1 && searchLabel.issues[0].id === `${PFX}-1`);
+
+    const searchMissing = await call("project_home_search_issues", { projectPath, query: "does-not-exist" });
+    check("search returns empty matches", searchMissing.issues.length === 0 && searchMissing.query === "does-not-exist");
+
     const got = await call("project_home_get_issue", { projectPath, issueId: `${PFX}-1` });
     check("get_issue retrieves issue", got?.id === `${PFX}-1` && got.title === "First issue");
 
@@ -167,6 +177,7 @@ function check(label, cond, detail = "") {
 
     const dryRun = await call("project_home_linear_sync", { projectPath, issueId: `${PFX}-1`, dryRun: true });
     check("linear dryRun plans update/create", dryRun.dryRun === true && dryRun.synced[0].issueId === `${PFX}-1`);
+    check("linear sync falls back to first accessible team", dryRun.teamId === "team-test", dryRun.teamId);
     check("linear dryRun leaves metadata empty", !dryRun.board.issues.find((i) => i.id === `${PFX}-1`)?.linear?.id);
 
     const synced = await call("project_home_linear_sync", { projectPath, issueId: `${PFX}-1` });
@@ -175,6 +186,13 @@ function check(label, cond, detail = "") {
 
     const updatedLinear = await call("project_home_linear_sync", { projectPath, issueId: `${PFX}-1` });
     check("linear sync updates linked issue", updatedLinear.synced[0].action === "update" && updatedLinear.synced[0].linearId === "lin-created-1");
+
+    const assignedSkipped = await call("project_home_linear_sync", { projectPath, issueId: `${PFX}-1`, dryRun: true, assignedToMeOnly: true });
+    check("linear assigned-only skips other assignee", assignedSkipped.skipped[0].issueId === `${PFX}-1`);
+
+    await call("project_home_update_issue", { projectPath, issueId: `${PFX}-1`, assignee: "Test User" });
+    const assignedSynced = await call("project_home_linear_sync", { projectPath, issueId: `${PFX}-1`, dryRun: true, assignedToMeOnly: true });
+    check("linear assigned-only syncs viewer assignee", assignedSynced.synced[0].issueId === `${PFX}-1` && assignedSynced.skipped.length === 0);
 
     const deleted = await call("project_home_delete_issue", { projectPath, issueId: `${PFX}-2` });
     check("delete removes issue", deleted.board.issues.every((i) => i.id !== `${PFX}-2`));
@@ -192,6 +210,25 @@ function check(label, cond, detail = "") {
     const issuesDir = path.join(dataDir, "project-home", "issues");
     const files = fs.readdirSync(issuesDir);
     check("db file persisted", files.length === 1 && files[0].endsWith(".json"), files.join(","));
+
+    const settingsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ph-settings-"));
+    const settingsStore = createIssueStore({ root: settingsRoot });
+    const settingsBoard = settingsStore.updateSettings(projectPath, {
+      linear: {
+        enabled: true,
+        teamId: "team-settings",
+        apiKey: "lin_api_settings",
+        apiUrl: "https://api.linear.app/graphql",
+        defaultSyncMode: "write",
+        assignedToMeOnly: true,
+      },
+    });
+    check("settings save persists Linear config", settingsBoard.settings.linear.teamId === "team-settings" && settingsBoard.settings.linear.enabled === true);
+    check("settings save keeps API key", settingsBoard.settings.linear.apiKey === "lin_api_settings");
+    check("settings save keeps assigned-only flag", settingsBoard.settings.linear.assignedToMeOnly === true);
+    const settingsReloaded = settingsStore.list(projectPath);
+    check("settings reload from disk", settingsReloaded.settings.linear.defaultSyncMode === "write");
+    try { fs.rmSync(settingsRoot, { recursive: true, force: true }); } catch {}
 
   } catch (err) {
     console.error("Test harness error:", err);

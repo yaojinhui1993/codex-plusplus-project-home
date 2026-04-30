@@ -21,13 +21,19 @@ const HEADER_ATTR = "data-codexpp-project-home-header";
 const VIEW_MODE_STORAGE_KEY = "project-home:view-mode";
 const VISIBLE_COLUMNS_STORAGE_KEY = "project-home:visible-columns";
 const COLLAPSED_SECTIONS_STORAGE_KEY = "project-home:collapsed-sections";
+const SEARCH_QUERY_STORAGE_KEY = "project-home:search-query";
 
 const IPC_BOARD_LIST = "project-home:issues:list";
 const IPC_ISSUE_CREATE = "project-home:issue:create";
 const IPC_ISSUE_UPDATE = "project-home:issue:update";
 const IPC_ISSUE_MOVE = "project-home:issue:move";
 const IPC_ISSUE_DELETE = "project-home:issue:delete";
+const IPC_SETTINGS_UPDATE = "project-home:settings:update";
 const IPC_OPEN_PROJECT_FOLDER = "project-home:project:open-folder";
+const IPC_OPEN_EXTERNAL = "project-home:external:open";
+const IPC_LINEAR_TEAMS = "project-home:linear:teams";
+const IPC_LINEAR_SYNC = "project-home:linear:sync";
+const LINEAR_API_SETTINGS_URL = "https://linear.app/settings/api";
 
 const ISSUE_COLUMNS = [
   { id: "backlog", title: "Backlog" },
@@ -83,6 +89,9 @@ module.exports = {
       return;
     }
     state.disposed = true;
+    window.removeEventListener("pointerdown", state.onSearchPointerDown, true);
+    window.removeEventListener("mousedown", state.onSearchMouseDown, true);
+    window.removeEventListener("click", state.onSearchClick, true);
     document.removeEventListener("pointerdown", state.onPointerDown, true);
     document.removeEventListener("click", state.onClick, true);
     document.removeEventListener("keydown", state.onKeyDown, true);
@@ -91,6 +100,8 @@ module.exports = {
     window.removeEventListener("hashchange", state.onRouteChange);
     window.removeEventListener(ROUTE_EVENT, state.onRouteChange);
     state.restoreHistory?.();
+    state.pageHandle?.unregister?.();
+    if (state.settingsSaveResetTimer) window.clearTimeout(state.settingsSaveResetTimer);
     state.observer?.disconnect();
     if (state.applyTimer) window.clearTimeout(state.applyTimer);
     for (const timer of state.retryTimers || []) window.clearTimeout(timer);
@@ -113,7 +124,11 @@ function startMain(self, api) {
       removeMainHandler(api, IPC_ISSUE_UPDATE);
       removeMainHandler(api, IPC_ISSUE_MOVE);
       removeMainHandler(api, IPC_ISSUE_DELETE);
+      removeMainHandler(api, IPC_SETTINGS_UPDATE);
       removeMainHandler(api, IPC_OPEN_PROJECT_FOLDER);
+      removeMainHandler(api, IPC_OPEN_EXTERNAL);
+      removeMainHandler(api, IPC_LINEAR_TEAMS);
+      removeMainHandler(api, IPC_LINEAR_SYNC);
     },
   };
   self._state = state;
@@ -133,11 +148,29 @@ function startMain(self, api) {
     ));
   replaceMainHandler(api, IPC_ISSUE_DELETE, (payload) =>
     store.delete(requireProjectPath(payload), requireIssueId(payload)));
+  replaceMainHandler(api, IPC_SETTINGS_UPDATE, (payload) =>
+    store.updateSettings(requireProjectPath(payload), payload?.settings || {}));
   replaceMainHandler(api, IPC_OPEN_PROJECT_FOLDER, async (payload) => {
     const { shell } = require("electron");
     const result = await shell.openPath(requireProjectPath(payload));
     return { ok: !result, error: result || "" };
   });
+  replaceMainHandler(api, IPC_OPEN_EXTERNAL, async (payload) => {
+    const { shell } = require("electron");
+    const url = String(payload?.url || "").trim();
+    if (!/^https:\/\/linear\.app\//i.test(url)) {
+      throw new Error("Only Linear links can be opened from Project Home settings");
+    }
+    await shell.openExternal(url);
+    return { ok: true };
+  });
+  replaceMainHandler(api, IPC_LINEAR_TEAMS, async (payload) => {
+    const apiKey = String(payload?.apiKey || "").trim();
+    if (!apiKey) throw new Error("API key is required to load Linear teams");
+    return listLinearTeams(apiKey, payload?.apiUrl);
+  });
+  replaceMainHandler(api, IPC_LINEAR_SYNC, async (payload) =>
+    syncLinearIssues(store, requireProjectPath(payload), payload || {}));
 
   api.log.info("[project-home] main issue store active", { root: store.root });
 }
@@ -166,6 +199,317 @@ function requireIssueId(payload) {
   return id;
 }
 
+async function listLinearTeams(apiKey, apiUrl) {
+  const endpoint = String(apiUrl || "").trim() || "https://api.linear.app/graphql";
+  const authorization = /^lin_oauth_/i.test(apiKey) ? `Bearer ${apiKey}` : apiKey;
+  if (typeof fetch !== "function") throw new Error("Loading Linear teams requires Node.js 18+ fetch support");
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: authorization,
+    },
+    body: JSON.stringify({
+      query: `
+        query ProjectHomeLinearTeams {
+          teams {
+            nodes { id name key }
+          }
+        }
+      `,
+    }),
+  });
+  const text = await response.text();
+  let payload;
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(`Linear returned non-JSON response (${response.status})`);
+  }
+  if (!response.ok) throw new Error(linearHttpErrorMessage(response.status, payload.errors?.[0]?.message || text));
+  if (Array.isArray(payload.errors) && payload.errors.length) {
+    throw new Error(payload.errors.map((error) => error.message).join("; "));
+  }
+  return { teams: payload.data?.teams?.nodes || [] };
+}
+
+async function syncLinearIssues(store, projectPath, args = {}) {
+  const board = store.list(projectPath);
+  const settings = board.settings?.linear || {};
+  const apiKey = String(args.apiKey || settings.apiKey || "").trim();
+  if (!apiKey) throw new Error("Enter a Linear API key in Settings > Project Home before syncing.");
+  const apiUrl = args.apiUrl || settings.apiUrl || "";
+  const client = createAppLinearClient(apiKey, apiUrl);
+  const teamId = String(args.teamId || settings.teamId || "").trim() || await firstLinearTeamId(client);
+  const states = await client.teamStates(teamId);
+  let syncBoard = board;
+  let pulled = { imported: [], columns: [] };
+  if (args.pull) {
+    const imported = store.importLinear(projectPath, {
+      columns: linearColumnsFromStates(states),
+      issues: (await client.issues(teamId)).map(linearIssueFromApi),
+    });
+    syncBoard = imported.board;
+    pulled = { imported: imported.imported, columns: imported.board.columns };
+  }
+  const assignedToMeOnly = Boolean(args.assignedToMeOnly || settings.assignedToMeOnly);
+  const viewer = assignedToMeOnly ? await client.viewer() : null;
+  const issues = syncBoard.issues.filter((issue) => !args.issueId || issue.id === args.issueId);
+  if (args.issueId && issues.length === 0) throw new Error(`Issue not found: ${args.issueId}`);
+  const synced = [];
+  const skipped = [];
+  const failed = [];
+
+  for (const issue of issues) {
+    const planned = {
+      issueId: issue.id,
+      action: issue.linear?.id ? "update" : "create",
+      linearId: issue.linear?.id || "",
+      title: issue.title,
+    };
+    if (assignedToMeOnly && !linearIssueAssignedToViewer(issue, viewer)) {
+      skipped.push({ ...planned, reason: "not_assigned_to_viewer", assignee: issue.assignee || "" });
+      continue;
+    }
+    try {
+      const input = appLinearIssueInput(issue, teamId, states, syncBoard.columns);
+      const linearIssue = issue.linear?.id
+        ? await client.updateIssue(issue.linear.id, input)
+        : await client.createIssue(input);
+      const patch = {
+        id: linearIssue.id,
+        identifier: linearIssue.identifier,
+        url: linearIssue.url,
+        syncedAt: new Date().toISOString(),
+        lastError: "",
+      };
+      store.setLinear(projectPath, issue.id, patch);
+      synced.push({ ...planned, ...patch });
+    } catch (error) {
+      const message = error?.message || String(error);
+      store.setLinear(projectPath, issue.id, {
+        ...(issue.linear || {}),
+        lastError: message,
+        syncedAt: new Date().toISOString(),
+      });
+      failed.push({ ...planned, error: message });
+    }
+  }
+
+  return { teamId, assignedToMeOnly, pulled, synced, skipped, failed, board: store.list(projectPath) };
+}
+
+function createAppLinearClient(apiKey, apiUrl) {
+  const endpoint = String(apiUrl || "").trim() || "https://api.linear.app/graphql";
+  const authorization = /^lin_oauth_/i.test(apiKey) ? `Bearer ${apiKey}` : apiKey;
+  async function request(query, variables = {}) {
+    if (typeof fetch !== "function") throw new Error("Linear sync requires Node.js 18+ fetch support");
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: authorization,
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+    const text = await response.text();
+    let payload;
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error(`Linear returned non-JSON response (${response.status})`);
+    }
+    if (!response.ok) throw new Error(linearHttpErrorMessage(response.status, payload.errors?.[0]?.message || text));
+    if (Array.isArray(payload.errors) && payload.errors.length) {
+      throw new Error(payload.errors.map((error) => error.message).join("; "));
+    }
+    return payload.data || {};
+  }
+  return {
+    async viewer() {
+      const data = await request("query ProjectHomeViewer { viewer { id name displayName email } }");
+      return data.viewer || {};
+    },
+    async teams() {
+      const data = await request("query ProjectHomeLinearTeams { teams { nodes { id name key } } }");
+      return data.teams?.nodes || [];
+    },
+    async teamStates(teamId) {
+      const data = await request(`
+        query ProjectHomeTeamStates($teamId: String!) {
+          team(id: $teamId) { states { nodes { id name type position } } }
+        }
+      `, { teamId });
+      return data.team?.states?.nodes || [];
+    },
+    async issues(teamId) {
+      let after = null;
+      const issues = [];
+      do {
+        const data = await request(`
+          query ProjectHomeTeamIssues($teamId: ID!, $after: String) {
+            issues(first: 100, after: $after, filter: { team: { id: { eq: $teamId } } }) {
+              nodes {
+                id
+                identifier
+                url
+                title
+                description
+                priority
+                dueDate
+                createdAt
+                updatedAt
+                state { id name type position }
+                assignee { name displayName email }
+                labels { nodes { name } }
+              }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        `, { teamId, after });
+        issues.push(...(data.issues?.nodes || []));
+        after = data.issues?.pageInfo?.hasNextPage ? data.issues.pageInfo.endCursor : null;
+      } while (after);
+      return issues;
+    },
+    async createIssue(input) {
+      const data = await request(`
+        mutation ProjectHomeCreateIssue($input: IssueCreateInput!) {
+          issueCreate(input: $input) {
+            success
+            issue { id identifier url title updatedAt }
+          }
+        }
+      `, { input });
+      const issue = data.issueCreate?.issue;
+      if (!data.issueCreate?.success || !issue?.id) throw new Error("Linear issueCreate did not return an issue");
+      return issue;
+    },
+    async updateIssue(id, input) {
+      const { teamId, ...patch } = input;
+      const data = await request(`
+        mutation ProjectHomeUpdateIssue($id: String!, $input: IssueUpdateInput!) {
+          issueUpdate(id: $id, input: $input) {
+            success
+            issue { id identifier url title updatedAt }
+          }
+        }
+      `, { id, input: patch });
+      const issue = data.issueUpdate?.issue;
+      if (!data.issueUpdate?.success || !issue?.id) throw new Error("Linear issueUpdate did not return an issue");
+      return issue;
+    },
+  };
+}
+
+async function firstLinearTeamId(client) {
+  const teams = await client.teams();
+  const first = teams[0];
+  if (!first?.id) throw new Error("No Linear teams were available to this API key.");
+  return first.id;
+}
+
+function appLinearIssueInput(issue, teamId, states, columns = []) {
+  const input = {
+    teamId,
+    title: String(issue.title || "Untitled issue"),
+    description: appLinearDescription(issue),
+    priority: appLinearPriority(issue.priority),
+  };
+  const stateId = appLinearStateId(issue.status, states, columns);
+  if (stateId) input.stateId = stateId;
+  if (issue.dueDate) input.dueDate = issue.dueDate;
+  return input;
+}
+
+function appLinearDescription(issue) {
+  const parts = [];
+  if (issue.description) parts.push(issue.description);
+  parts.push(`\nSynced from Project Home issue ${issue.id}.`);
+  if (Array.isArray(issue.labels) && issue.labels.length) parts.push(`Labels: ${issue.labels.join(", ")}`);
+  if (issue.assignee) parts.push(`Assignee: ${issue.assignee}`);
+  if (Array.isArray(issue.comments) && issue.comments.length) {
+    parts.push("\nProject Home comments:");
+    for (const comment of issue.comments.slice(-10)) {
+      const author = comment.author ? `${comment.author}: ` : "";
+      parts.push(`- ${author}${comment.body}`);
+    }
+  }
+  return parts.join("\n");
+}
+
+function appLinearPriority(priority) {
+  return ({ urgent: 1, high: 2, medium: 3, low: 4, none: 0 })[String(priority || "none").toLowerCase()] ?? 0;
+}
+
+function appLinearStateId(status, states, columns = []) {
+  const column = columns.find((item) => item.id === status);
+  if (column?.linearStateId && states.some((state) => state.id === column.linearStateId)) return column.linearStateId;
+  const aliases = {
+    backlog: ["backlog", "triage"],
+    todo: ["todo", "to do", "planned", "unstarted"],
+    in_progress: ["in_progress", "in progress", "started"],
+    in_review: ["in_review", "in review", "review"],
+    done: ["done", "completed", "complete"],
+  }[String(status || "").toLowerCase()] || [];
+  const normalized = new Set(aliases.map(normalizeLinearName));
+  const found = states.find((state) => normalized.has(normalizeLinearName(state.name)));
+  return found?.id || "";
+}
+
+function linearColumnsFromStates(states) {
+  return states
+    .slice()
+    .sort((a, b) => (Number(a.position) || 0) - (Number(b.position) || 0) || String(a.name).localeCompare(String(b.name)))
+    .map((state) => ({
+      id: linearStatusId(state),
+      title: state.name || "Untitled",
+      linearStateId: state.id,
+      linearType: state.type || "",
+    }));
+}
+
+function linearStatusId(state) {
+  const stateId = String(state?.id || "").trim();
+  if (stateId) return `linear_${stateId.replace(/[^A-Za-z0-9]+/g, "_").toLowerCase()}`;
+  return normalizeLinearName(state?.name).replace(/\s/g, "_") || "backlog";
+}
+
+function linearIssueFromApi(issue) {
+  return {
+    id: issue.id,
+    identifier: issue.identifier,
+    url: issue.url,
+    title: issue.title,
+    description: issue.description,
+    priority: issue.priority,
+    dueDate: issue.dueDate,
+    createdAt: issue.createdAt,
+    updatedAt: issue.updatedAt,
+    state: issue.state,
+    assignee: issue.assignee?.displayName || issue.assignee?.name || issue.assignee?.email || "",
+    labels: Array.isArray(issue.labels?.nodes) ? issue.labels.nodes.map((label) => label.name).filter(Boolean) : [],
+  };
+}
+
+function linearIssueAssignedToViewer(issue, viewer) {
+  const assignee = normalizeLinearName(issue.assignee);
+  if (!assignee) return false;
+  const candidates = [viewer?.name, viewer?.displayName, viewer?.email].map(normalizeLinearName).filter(Boolean);
+  return candidates.some((candidate) => assignee === candidate || assignee.includes(candidate) || candidate.includes(assignee));
+}
+
+function normalizeLinearName(value) {
+  return String(value || "").toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function linearHttpErrorMessage(status, detail) {
+  if (status === 401) {
+    return "Linear rejected the saved API key. Re-enter the personal API key in Settings > Project Home, then load teams again.";
+  }
+  return `Linear HTTP ${status}: ${detail}`;
+}
+
 function startRenderer(self, api) {
   const state = {
     process: "renderer",
@@ -182,6 +526,14 @@ function startRenderer(self, api) {
     viewMode: readStoredViewMode(api),
     visibleColumns: readStoredVisibleColumns(api),
     collapsedSections: readStoredCollapsedSections(api),
+    searchQuery: readStoredSearchQuery(api),
+    selectedIssueIds: new Set(),
+    lastSelectedIssueId: "",
+    pageHandle: null,
+    pageRoot: null,
+    settingsSaveResetTimer: null,
+    settingsSaveStatus: "idle",
+    settingsSheetOpen: false,
     editor: null,
     view: null,
     host: null,
@@ -194,6 +546,9 @@ function startRenderer(self, api) {
     ignoreRouteUntil: 0,
     applyTimer: null,
     retryTimers: [],
+    onSearchPointerDown: null,
+    onSearchMouseDown: null,
+    onSearchClick: null,
     onPointerDown: null,
     onClick: null,
     onKeyDown: null,
@@ -203,11 +558,53 @@ function startRenderer(self, api) {
   };
   self._state = state;
 
+  if (typeof api.settings?.registerPage === "function") {
+    state.pageHandle = api.settings.registerPage({
+      id: "main",
+      title: "Project Home",
+      description: "Configure Project Home issue and Linear sync settings.",
+      iconSvg: homeIconSvg(),
+      render: (root) => renderProjectHomeSettingsPage(root, state),
+    });
+  } else {
+    api.log.warn("[project-home] settings.registerPage unavailable");
+  }
+
+  state.onSearchPointerDown = (event) => {
+    const search = closestIssueSearch(event.target);
+    if (!search) return;
+    focusIssueSearch(search);
+    stopEventPropagation(event);
+  };
+  state.onSearchMouseDown = state.onSearchPointerDown;
+  state.onSearchClick = (event) => {
+    const search = closestIssueSearch(event.target);
+    if (!search) return;
+    const clear = closestIssueSearchClear(event.target);
+    if (clear) {
+      event.preventDefault();
+      const input = search.querySelector("[data-issue-search-input]");
+      updateIssueSearch(state, "");
+      search.dataset.hasQuery = "false";
+      if (input instanceof HTMLInputElement) {
+        input.value = "";
+        focusIssueSearch(search);
+      }
+      stopEventPropagation(event);
+      return;
+    }
+    focusIssueSearch(search);
+    stopEventPropagation(event);
+  };
   state.onPointerDown = (event) => {
     if (!closestHomeButton(event.target)) return;
     stopProjectHomeEvent(event);
   };
   state.onClick = (event) => {
+    if (closestIssueSearch(event.target)) {
+      state.onSearchClick(event);
+      return;
+    }
     const button = closestHomeButton(event.target);
     if (!button) {
       const navTarget = externalNavigationTarget(state, event.target);
@@ -296,6 +693,16 @@ function startRenderer(self, api) {
         if (state.current) loadProjectHomeBoard(state, state.current, { force: true });
         return;
       }
+      if (isPlainKey(event, "/") || isFindShortcut(event)) {
+        const input = state.headerNode?.querySelector?.("[data-issue-search-input]");
+        if (input instanceof HTMLInputElement) {
+          event.preventDefault();
+          event.stopPropagation();
+          input.focus();
+          input.select();
+          return;
+        }
+      }
       if (isPlainKey(event, "v")) {
         event.preventDefault();
         event.stopPropagation();
@@ -303,6 +710,20 @@ function startRenderer(self, api) {
         state.api.storage?.set?.(VIEW_MODE_STORAGE_KEY, state.viewMode);
         renderProjectHomeView(state);
         syncHeaderForProjectHome(state);
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key?.toLowerCase() === "a") {
+        event.preventDefault();
+        event.stopPropagation();
+        state.selectedIssueIds = new Set(orderedIssues(state).map((issue) => issue.id));
+        state.lastSelectedIssueId = "";
+        renderProjectHomeView(state);
+        return;
+      }
+      if (event.key === "Escape" && selectedIssueCount(state) > 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        clearIssueSelection(state);
         return;
       }
       const propertyKey = ({ s: "status", p: "priority", d: "due", a: "assignee", l: "labels" })[event.key?.toLowerCase()];
@@ -316,6 +737,12 @@ function startRenderer(self, api) {
         }
       }
       if (event.key === "Backspace" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        if (selectedIssueCount(state) > 0) {
+          event.preventDefault();
+          event.stopPropagation();
+          confirmDeleteIssues(state, selectedIssues(state));
+          return;
+        }
         const hovered = findHoveredIssue(state);
         if (hovered) {
           event.preventDefault();
@@ -339,6 +766,9 @@ function startRenderer(self, api) {
   state.onRouteChange = () => handleRouteChange(state);
   state.restoreHistory = patchHistoryNavigation();
 
+  window.addEventListener("pointerdown", state.onSearchPointerDown, true);
+  window.addEventListener("mousedown", state.onSearchMouseDown, true);
+  window.addEventListener("click", state.onSearchClick, true);
   document.addEventListener("pointerdown", state.onPointerDown, true);
   document.addEventListener("click", state.onClick, true);
   document.addEventListener("keydown", state.onKeyDown, true);
@@ -472,6 +902,7 @@ function installStyle() {
       flex: none;
       box-shadow: inset 0 0 0 1.5px currentColor;
       background: transparent;
+      color: var(--project-home-status-color, currentColor);
     }
     [${COLUMN_ATTR}][data-status="todo"] [data-status-dot],
     [${VIEW_ATTR}="issue-card"][data-status="todo"] [data-status-dot] { color: #a1a1aa; }
@@ -510,6 +941,13 @@ function installStyle() {
       cursor: grabbing;
       opacity: .55;
       transform: scale(.99);
+    }
+
+    [${VIEW_ATTR}="issue-card"][data-selected="true"],
+    [${VIEW_ATTR}="list-row"][data-selected="true"] {
+      border-color: var(--color-token-focus-border, #3b82f6);
+      background: color-mix(in srgb, var(--color-token-main-surface-primary, Canvas) 82%, #3b82f6);
+      box-shadow: inset 0 0 0 1px var(--color-token-focus-border, #3b82f6);
     }
 
     [${VIEW_ATTR}="issue-card"] [data-issue-title] {
@@ -680,6 +1118,7 @@ function installStyle() {
       border: 1px solid var(--color-token-border-light, var(--color-token-border, rgba(0,0,0,.12)));
       border-radius: 8px;
       overflow: hidden;
+      -webkit-app-region: no-drag;
     }
 
     [${VIEW_ATTR}="toolbar-segment"] button {
@@ -691,9 +1130,74 @@ function installStyle() {
       border: 0;
       background: transparent;
       color: var(--color-token-description-foreground, currentColor);
+      -webkit-app-region: no-drag;
     }
 
     [${VIEW_ATTR}="toolbar-segment"] button[aria-pressed="true"] {
+      background: var(--color-token-list-hover-background, rgba(127,127,127,.10));
+      color: var(--color-token-foreground, currentColor);
+    }
+
+    [${VIEW_ATTR}="search"] {
+      width: min(280px, 30vw);
+      min-width: 170px;
+      height: 32px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--color-token-border-light, var(--color-token-border, rgba(0,0,0,.12)));
+      border-radius: 8px;
+      padding: 0 8px;
+      color: var(--color-token-description-foreground, currentColor);
+      background: var(--color-token-main-surface-primary, transparent);
+      -webkit-app-region: no-drag;
+    }
+
+    [${VIEW_ATTR}="search"]:focus-within {
+      border-color: var(--color-token-border, rgba(0,0,0,.32));
+      color: var(--color-token-foreground, currentColor);
+    }
+
+    [${VIEW_ATTR}="search"] input {
+      min-width: 0;
+      flex: 1;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--color-token-text-primary, currentColor);
+      font: inherit;
+      font-size: 13px;
+      line-height: 18px;
+      -webkit-app-region: no-drag;
+    }
+
+    [${VIEW_ATTR}="search"] input::placeholder {
+      color: var(--color-token-description-foreground, currentColor);
+      opacity: .65;
+    }
+
+    [${VIEW_ATTR}="search"] button {
+      display: none;
+      width: 18px;
+      height: 18px;
+      flex: none;
+      align-items: center;
+      justify-content: center;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--color-token-description-foreground, currentColor);
+      padding: 0;
+      -webkit-app-region: no-drag;
+    }
+
+    [${VIEW_ATTR}="search"][data-has-query="true"] button {
+      display: inline-flex;
+    }
+
+    [${VIEW_ATTR}="search"] button:hover,
+    [${VIEW_ATTR}="search"] button:focus-visible {
+      outline: none;
       background: var(--color-token-list-hover-background, rgba(127,127,127,.10));
       color: var(--color-token-foreground, currentColor);
     }
@@ -711,6 +1215,7 @@ function installStyle() {
       align-items: center;
       min-height: 32px;
       padding: 0 14px;
+      border: 1px solid transparent;
       font-size: 13px;
       line-height: 18px;
       color: var(--color-token-text-primary, currentColor);
@@ -744,6 +1249,7 @@ function installStyle() {
       border-radius: 999px;
       box-shadow: inset 0 0 0 1.5px currentColor;
       background: transparent;
+      color: var(--project-home-status-color, currentColor);
     }
     [${VIEW_ATTR}="list-row"][data-status="todo"] [data-status-dot] { color: #a1a1aa; }
     [${VIEW_ATTR}="list-row"][data-status="backlog"] [data-status-dot] { color: #71717a; }
@@ -806,7 +1312,9 @@ function installStyle() {
       border: 0;
       border-top: 1px solid var(--color-token-border, rgba(0,0,0,.14));
       border-bottom: 1px solid var(--color-token-border, rgba(0,0,0,.14));
-      background: var(--color-token-main-surface-tertiary, var(--color-token-main-surface-secondary, rgba(127,127,127,.06)));
+      background: color-mix(in srgb, var(--color-token-main-surface-tertiary, var(--color-token-main-surface-secondary, Canvas)) 88%, transparent);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
       position: sticky;
       top: 0;
       z-index: 1;
@@ -853,6 +1361,7 @@ function installStyle() {
       border-radius: 999px;
       display: inline-block;
       box-shadow: inset 0 0 0 1.5px currentColor;
+      color: var(--project-home-status-color, currentColor);
     }
     [data-list-section][data-status="todo"] [data-list-section-header] [data-status-dot] { color: #a1a1aa; }
     [data-list-section][data-status="backlog"] [data-list-section-header] [data-status-dot] { color: #71717a; }
@@ -893,6 +1402,24 @@ function installStyle() {
       font-size: 12px;
       color: var(--color-token-description-foreground, currentColor);
       opacity: .5;
+    }
+
+    [data-search-empty] {
+      display: flex;
+      height: 100%;
+      min-height: 160px;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--color-token-description-foreground, currentColor);
+      opacity: .68;
+    }
+
+    [${VIEW_ATTR}="board"] > [data-search-empty] {
+      grid-column: 1 / -1;
+      width: 100%;
     }
 
     [${VIEW_ATTR}="editor-backdrop"] {
@@ -1101,6 +1628,19 @@ function installStyle() {
       gap: 16px;
       padding-left: calc(var(--padding-toolbar-x, .5rem) + 16px);
       padding-right: var(--padding-toolbar-x, .5rem);
+      -webkit-app-region: no-drag;
+    }
+
+    [${HEADER_ATTR}="root"] button,
+    [${HEADER_ATTR}="root"] input {
+      -webkit-app-region: no-drag;
+    }
+
+    @media (max-width: 900px) {
+      [${VIEW_ATTR}="search"] {
+        width: min(220px, 34vw);
+        min-width: 140px;
+      }
     }
 
     [${HEADER_ATTR}="identity"] {
@@ -1360,6 +1900,7 @@ function renderProjectHomeView(state) {
     }
 
     if (state.editor) contentBlock.append(renderIssueEditor(state));
+    if (state.settingsSheetOpen) contentBlock.append(renderProjectHomeSettingsSheet(state));
   } catch (error) {
     state.boardError = error?.message || String(error);
     contentBlock.replaceChildren(renderProjectHomeError(state.boardError));
@@ -1379,12 +1920,398 @@ function renderProjectHomeError(message) {
   return error;
 }
 
+function renderSearchEmpty(state) {
+  const empty = document.createElement("div");
+  empty.setAttribute("data-search-empty", "");
+  empty.textContent = `No issues match "${state.searchQuery}".`;
+  return empty;
+}
+
+function renderProjectHomeSettingsSheet(state) {
+  const backdrop = document.createElement("div");
+  backdrop.setAttribute(VIEW_ATTR, "editor-backdrop");
+  backdrop.addEventListener("pointerdown", (event) => {
+    if (event.target === backdrop) closeProjectSettingsSheet(state);
+  });
+
+  const panel = document.createElement("form");
+  panel.setAttribute(VIEW_ATTR, "editor-panel");
+  panel.setAttribute("aria-label", "Project Home settings");
+  panel.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+  const head = document.createElement("div");
+  head.setAttribute("data-editor-head", "");
+  const crumb = document.createElement("div");
+  crumb.setAttribute("data-editor-crumb", "");
+  crumb.textContent = "Project Home settings";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "ml-auto flex size-7 items-center justify-center rounded-md text-token-description-foreground hover:bg-token-list-hover-background hover:text-token-foreground";
+  close.setAttribute("aria-label", "Close settings");
+  close.innerHTML = xIconSvg();
+  close.addEventListener("click", () => closeProjectSettingsSheet(state));
+  head.append(crumb, close);
+
+  const body = document.createElement("div");
+  body.setAttribute("data-editor-body", "");
+  body.className = "flex flex-col gap-4 px-4 py-4";
+
+  const projectPath = state.current?.path || "";
+  const linear = state.board?.settings?.linear || {};
+  const status = pageEl("div", "text-sm text-token-text-secondary");
+  if (!projectPath) status.textContent = "Open Project Home for a project before saving settings.";
+
+  const teamId = pageTextInput("teamId", linear.teamId || "", "Linear team UUID", { compact: true });
+  const teamPicker = createLinearTeamPicker(state, { apiKey: null, teamId, apiUrl: null, status });
+  const teamControls = pageEl("div", "flex min-w-0 flex-col gap-2");
+  teamControls.append(teamId, teamPicker);
+  body.append(settingsSheetRow("Linear workspace/team", "Choose the Linear team for this Project Home board.", teamControls));
+
+  const assignedOnly = pageSwitch(Boolean(linear.assignedToMeOnly));
+  assignedOnly.input.name = "assignedToMeOnly";
+  body.append(settingsSheetRow(
+    "Only sync issues assigned to you",
+    "When enabled, future sync actions should skip unassigned issues and issues assigned to someone else.",
+    assignedOnly.root,
+  ));
+
+  const foot = document.createElement("div");
+  foot.setAttribute("data-editor-foot", "");
+  const actions = pageEl("div", "ml-auto flex items-center gap-2");
+  const cancel = pageButton("Cancel", "secondary");
+  cancel.type = "button";
+  cancel.addEventListener("click", () => closeProjectSettingsSheet(state));
+  const save = pageButton(sheetSaveLabel(state), state.settingsSaveStatus === "saved" ? "success" : "primary");
+  save.type = "submit";
+  save.disabled = !projectPath || state.settingsSaveStatus === "saving";
+  actions.append(cancel, save);
+  foot.append(status, actions);
+
+  panel.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!projectPath) {
+      status.textContent = "Open Project Home for a project before saving settings.";
+      return;
+    }
+    await saveProjectHomeSettings(state, {
+      projectPath,
+      settings: {
+        linear: {
+          enabled: linear.enabled,
+          teamId: teamId.value,
+          apiKey: linear.apiKey,
+          apiUrl: linear.apiUrl,
+          defaultSyncMode: linear.defaultSyncMode || "dryRun",
+          assignedToMeOnly: assignedOnly.input.checked,
+        },
+      },
+      status,
+      save,
+      closeOnSave: false,
+    });
+  });
+
+  panel.append(head, body, foot);
+  backdrop.append(panel);
+  return backdrop;
+}
+
+function renderProjectHomeSettingsPage(root, state) {
+  state.pageRoot = root;
+  root.replaceChildren();
+
+  const projectPath = state.current?.path || state.pageProjectPath || "";
+  const activeBoard = state.pageSettingsBoard?.projectPath === projectPath
+    ? state.pageSettingsBoard
+    : sameProject(state.current, { path: projectPath, label: state.current?.label || "" })
+      ? state.board
+      : null;
+  const linear = activeBoard?.settings?.linear || {};
+
+  const card = pageCard();
+  const form = document.createElement("form");
+  form.className = "flex flex-col divide-y-[0.5px] divide-token-border";
+
+  const enabled = pageSwitch(Boolean(linear.enabled));
+  enabled.input.name = "enabled";
+  const linearControls = pageEl("div", "flex shrink-0 items-center gap-3");
+  const linearLink = pageButton("Open Linear API settings", "secondary");
+  linearLink.type = "button";
+  linearLink.addEventListener("click", async () => {
+    try {
+      await state.api.ipc.invoke(IPC_OPEN_EXTERNAL, { url: LINEAR_API_SETTINGS_URL });
+    } catch (error) {
+      state.api.log.error("[project-home] could not open Linear settings", { error: error?.message || String(error) });
+    }
+  });
+  linearControls.append(linearLink, enabled.root);
+  form.append(pageSettingsRow(
+    "Linear sync",
+    "Optional. Allow the current Project Home board to sync issues to Linear. Use Linear API settings to create a personal API key and choose team access.",
+    linearControls,
+  ));
+
+  const apiKey = pageTextInput("apiKey", linear.apiKey || "", "lin_api_...", { type: "password", required: true });
+  form.append(pageSettingsRow("API key (required)", "Stored locally in the Project Home issue database for this project.", apiKey));
+
+  const teamId = pageTextInput("teamId", linear.teamId || "", "Linear team UUID");
+  const pageTeamPicker = createLinearTeamPicker(state, { apiKey, teamId, apiUrl: null, status: null });
+  const pageTeamControls = pageEl("div", "flex min-w-0 flex-col gap-2");
+  pageTeamControls.append(teamId, pageTeamPicker);
+  form.append(pageSettingsRow("Workspace/team (optional)", "Leave blank to use the first Linear team available to your API key.", pageTeamControls));
+
+  const apiUrl = pageTextInput("apiUrl", linear.apiUrl || "", "https://api.linear.app/graphql");
+  form.append(pageSettingsRow("API URL (optional)", "Leave blank to use Linear's default GraphQL API.", apiUrl));
+
+  const defaultSyncMode = pageSelect("defaultSyncMode", linear.defaultSyncMode || "dryRun", [
+    { id: "dryRun", title: "Dry run first" },
+    { id: "write", title: "Write immediately" },
+  ]);
+  form.append(pageSettingsRow("Default mode (optional)", "Choose the default behavior for UI-initiated sync actions.", defaultSyncMode));
+
+  const footer = pageEl("div", "flex items-center justify-between gap-3 p-4");
+  const status = pageEl("div", "min-w-0 text-sm text-token-text-secondary");
+  const saveStatus = state.settingsSaveStatus || "idle";
+  const save = pageButton(saveStatus === "saved" ? "Saved" : saveStatus === "saving" ? "Saving..." : "Save settings",
+    saveStatus === "saved" ? "success" : "primary");
+  save.type = "submit";
+  save.disabled = !projectPath || saveStatus === "saving";
+  if (!projectPath) status.textContent = "Open Project Home for a project before saving settings.";
+  else if (saveStatus === "saved") status.textContent = "Saved.";
+  footer.append(status, save);
+  form.append(footer);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const nextPath = projectPath;
+    if (!nextPath) {
+      status.textContent = "Open Project Home for a project before saving settings.";
+      return;
+    }
+    save.disabled = true;
+    state.settingsSaveStatus = "saving";
+    save.textContent = "Saving...";
+    status.textContent = "Saving...";
+    if (state.settingsSaveResetTimer) {
+      window.clearTimeout(state.settingsSaveResetTimer);
+      state.settingsSaveResetTimer = null;
+    }
+    try {
+      const board = await state.api.ipc.invoke(IPC_SETTINGS_UPDATE, {
+        projectPath: nextPath,
+        settings: {
+          linear: {
+            enabled: enabled.input.checked,
+            teamId: teamId.value,
+            apiKey: apiKey.value,
+            apiUrl: apiUrl.value,
+            defaultSyncMode: defaultSyncMode.value,
+            assignedToMeOnly: Boolean(linear.assignedToMeOnly),
+          },
+        },
+      });
+      const normalized = normalizeBoard(board);
+      state.pageProjectPath = nextPath;
+      state.pageSettingsBoard = normalized;
+      if (state.current?.path === nextPath) {
+        state.board = normalized;
+      }
+      if (linearSyncReady(normalized)) {
+        status.textContent = "Saved. Syncing issues...";
+        await syncProjectLinearIssues(state, { projectPath: nextPath, status });
+      }
+      state.settingsSaveStatus = "saved";
+      if (!status.textContent.includes("Synced")) status.textContent = "Saved.";
+      save.textContent = "Saved";
+      save.className = pageButtonClass("success");
+      state.settingsSaveResetTimer = window.setTimeout(() => {
+        state.settingsSaveStatus = "idle";
+        if (state.pageRoot?.isConnected) renderProjectHomeSettingsPage(state.pageRoot, state);
+        else if (save.isConnected) {
+          save.textContent = "Save settings";
+          save.className = pageButtonClass("primary");
+        }
+        state.settingsSaveResetTimer = null;
+      }, 1600);
+    } catch (error) {
+      state.settingsSaveStatus = "idle";
+      status.textContent = error?.message || String(error);
+      save.textContent = "Save settings";
+      save.className = pageButtonClass("primary");
+      save.disabled = false;
+      return;
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  card.append(form);
+  root.append(card);
+}
+
+function settingsSheetRow(title, description, control) {
+  const row = pageEl("label", "flex flex-col gap-2");
+  const head = pageEl("div", "flex flex-col gap-1");
+  const label = pageEl("div", "text-sm font-medium text-token-text-primary");
+  label.textContent = title;
+  const desc = pageEl("div", "text-xs leading-5 text-token-text-secondary");
+  desc.textContent = description;
+  head.append(label, desc);
+  row.append(head);
+  if (control) row.append(control);
+  return row;
+}
+
+function sheetInputClass() {
+  return [
+    "border-token-border bg-token-foreground/5 h-9 min-w-0 w-full",
+    "rounded-md border px-3 py-2 text-sm text-token-text-primary",
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-token-focus-border",
+  ].join(" ");
+}
+
+function createLinearTeamPicker(state, { apiKey, teamId, apiUrl, status }) {
+  const wrap = pageEl("div", "flex min-w-0 items-center gap-2");
+  const load = pageButton("Load Linear teams", "secondary");
+  load.type = "button";
+  const select = document.createElement("select");
+  select.className = `${apiKey ? pageInputClass() : sheetInputClass()} max-w-[28rem]`;
+  select.style.display = "none";
+  select.addEventListener("change", () => {
+    if (select.value) teamId.value = select.value;
+  });
+  load.addEventListener("click", async () => {
+    const key = String(apiKey?.value || state.board?.settings?.linear?.apiKey || "").trim();
+    if (!key) {
+      if (status) status.textContent = "Enter a Linear API key before loading teams.";
+      return;
+    }
+    load.disabled = true;
+    load.textContent = "Loading...";
+    if (status) status.textContent = "Loading Linear teams...";
+    try {
+      const result = await state.api.ipc.invoke(IPC_LINEAR_TEAMS, {
+        apiKey: key,
+        apiUrl: apiUrl?.value || state.board?.settings?.linear?.apiUrl || "",
+      });
+      const teams = Array.isArray(result?.teams) ? result.teams : [];
+      select.replaceChildren();
+      if (teams.length === 0) {
+        if (status) status.textContent = "No Linear teams were available to this API key.";
+        return;
+      }
+      for (const team of teams) {
+        const option = document.createElement("option");
+        option.value = team.id || "";
+        option.textContent = [team.name, team.key ? `(${team.key})` : ""].filter(Boolean).join(" ");
+        select.append(option);
+      }
+      const current = String(teamId.value || "").trim();
+      if (current && teams.some((team) => team.id === current)) select.value = current;
+      else {
+        select.value = teams[0].id || "";
+        teamId.value = select.value;
+      }
+      select.style.display = "";
+      if (status) status.textContent = `Loaded ${teams.length} Linear team${teams.length === 1 ? "" : "s"}.`;
+    } catch (error) {
+      if (status) status.textContent = error?.message || String(error);
+    } finally {
+      load.disabled = false;
+      load.textContent = "Load Linear teams";
+    }
+  });
+  wrap.append(load, select);
+  return wrap;
+}
+
+async function saveProjectHomeSettings(state, { projectPath, settings, status, save }) {
+  save.disabled = true;
+  state.settingsSaveStatus = "saving";
+  save.textContent = "Saving...";
+  if (status) status.textContent = "Saving...";
+  if (state.settingsSaveResetTimer) {
+    window.clearTimeout(state.settingsSaveResetTimer);
+    state.settingsSaveResetTimer = null;
+  }
+  try {
+    const board = await state.api.ipc.invoke(IPC_SETTINGS_UPDATE, { projectPath, settings });
+    const normalized = normalizeBoard(board);
+    state.pageProjectPath = projectPath;
+    state.pageSettingsBoard = normalized;
+    if (state.current?.path === projectPath) state.board = normalized;
+    if (linearSyncReady(normalized)) {
+      if (status) status.textContent = "Saved. Syncing issues...";
+      await syncProjectLinearIssues(state, { projectPath, status });
+    }
+    state.settingsSaveStatus = "saved";
+    if (status && !status.textContent.includes("Synced")) status.textContent = "Saved.";
+    save.textContent = "Saved";
+    save.className = pageButtonClass("success");
+    state.settingsSaveResetTimer = window.setTimeout(() => {
+      state.settingsSaveStatus = "idle";
+      if (state.settingsSheetOpen) renderProjectHomeView(state);
+      else if (state.pageRoot?.isConnected) renderProjectHomeSettingsPage(state.pageRoot, state);
+      state.settingsSaveResetTimer = null;
+    }, 1600);
+  } catch (error) {
+    state.settingsSaveStatus = "idle";
+    if (status) status.textContent = error?.message || String(error);
+    save.textContent = "Save settings";
+    save.className = pageButtonClass("primary");
+  } finally {
+    save.disabled = false;
+  }
+}
+
+async function syncProjectLinearIssues(state, { projectPath, issueId, status, pull = true } = {}) {
+  const result = await state.api.ipc.invoke(IPC_LINEAR_SYNC, { projectPath, issueId, pull });
+  const board = normalizeBoard(result?.board);
+  state.pageProjectPath = projectPath;
+  state.pageSettingsBoard = board;
+  if (state.current?.path === projectPath) state.board = board;
+  const synced = Array.isArray(result?.synced) ? result.synced.length : 0;
+  const failed = Array.isArray(result?.failed) ? result.failed.length : 0;
+  const skipped = Array.isArray(result?.skipped) ? result.skipped.length : 0;
+  const imported = Array.isArray(result?.pulled?.imported) ? result.pulled.imported.length : 0;
+  if (status) {
+    const parts = [`Synced ${synced} issue${synced === 1 ? "" : "s"}`];
+    if (imported) parts.push(`${imported} pulled`);
+    if (skipped) parts.push(`${skipped} skipped`);
+    if (failed) parts.push(`${failed} failed`);
+    status.textContent = parts.join(", ") + ".";
+  }
+  return result;
+}
+
+function linearSyncReady(board) {
+  const linear = board?.settings?.linear || {};
+  return Boolean(linear.enabled && linear.apiKey);
+}
+
+function closeProjectSettingsSheet(state) {
+  state.settingsSheetOpen = false;
+  renderProjectHomeView(state);
+}
+
+function sheetSaveLabel(state) {
+  return state.settingsSaveStatus === "saved"
+    ? "Saved"
+    : state.settingsSaveStatus === "saving"
+      ? "Saving..."
+      : "Save settings";
+}
+
 function renderIssueBoard(state, project) {
   const board = document.createElement("div");
   board.setAttribute(VIEW_ATTR, "board");
   board.setAttribute("aria-label", "Project issues");
 
-  const issues = Array.isArray(state.board?.issues) ? state.board.issues : [];
+  const issues = filteredIssues(state);
+  if (!state.boardLoading && hasIssueSearch(state) && issues.length === 0) {
+    board.append(renderSearchEmpty(state));
+    return board;
+  }
   for (const column of visibleIssueColumns(state)) {
     const columnEl = document.createElement("section");
     columnEl.setAttribute(COLUMN_ATTR, column.id);
@@ -1400,6 +2327,7 @@ function renderIssueBoard(state, project) {
     const dot = document.createElement("span");
     dot.setAttribute("data-status-dot", "");
     dot.setAttribute("aria-hidden", "true");
+    applyStatusDotStyle(dot, column);
     const titleText = document.createElement("span");
     titleText.setAttribute("data-column-title", "");
     titleText.className = "truncate";
@@ -1459,13 +2387,116 @@ function renderIssueBoard(state, project) {
   return board;
 }
 
+function pageEl(tag, className) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  return node;
+}
+
+function pageCard() {
+  const card = pageEl("section", "border-token-border mt-4 overflow-hidden rounded-lg border");
+  card.style.backgroundColor = "var(--color-background-panel, var(--color-token-bg-fog))";
+  return card;
+}
+
+function pageSettingsRow(title, description, control) {
+  const row = pageEl("div", "flex items-start justify-between gap-5 p-4");
+  const copy = pageEl("div", "min-w-0 flex-1");
+  const label = pageEl("div", "text-sm font-medium text-token-text-primary");
+  label.textContent = title;
+  const desc = pageEl("div", "mt-1 max-w-[48rem] text-sm text-token-text-secondary");
+  desc.textContent = description;
+  copy.append(label, desc);
+  row.append(copy);
+  if (control) row.append(control);
+  return row;
+}
+
+function pageInputClass() {
+  return [
+    "border-token-border bg-token-foreground/5 h-token-button-composer min-w-0 flex-1",
+    "rounded-md border px-3 text-sm text-token-text-primary",
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-token-focus-border",
+  ].join(" ");
+}
+
+function pageTextInput(name, value, placeholder, options = {}) {
+  const input = document.createElement("input");
+  input.type = options.type || "text";
+  input.name = name;
+  input.required = Boolean(options.required);
+  input.value = value || "";
+  input.placeholder = placeholder || "";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.className = `${options.compact ? sheetInputClass() : pageInputClass()} max-w-[28rem]`;
+  return input;
+}
+
+function pageSelect(name, value, options) {
+  const input = document.createElement("select");
+  input.name = name;
+  input.className = `${pageInputClass()} max-w-[16rem]`;
+  for (const option of options) {
+    const item = document.createElement("option");
+    item.value = option.id;
+    item.textContent = option.title;
+    input.append(item);
+  }
+  input.value = value || options[0]?.id || "";
+  return input;
+}
+
+function pageButton(text, variant = "secondary") {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = pageButtonClass(variant);
+  button.textContent = text;
+  return button;
+}
+
+function pageButtonClass(variant = "secondary") {
+  return [
+    "h-token-button-composer shrink-0 rounded-md px-3 text-sm font-medium cursor-interaction",
+    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-token-focus-border",
+    variant === "primary"
+      ? "bg-token-text-primary text-token-main-surface-primary hover:opacity-90"
+      : variant === "success"
+        ? "bg-token-charts-green text-token-main-surface-primary hover:opacity-90"
+      : "border border-token-border bg-token-foreground/5 text-token-text-primary hover:bg-token-foreground/10",
+  ].join(" ");
+}
+
+function pageSwitch(checked) {
+  const root = document.createElement("label");
+  root.className = "inline-flex shrink-0 items-center gap-3";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  input.className = "sr-only";
+  const track = pageEl("span", "relative inline-flex h-5 w-8 shrink-0 items-center rounded-full transition-colors duration-200 ease-out");
+  const knob = pageEl("span", "h-4 w-4 rounded-full border border-[color:var(--gray-0)] bg-[color:var(--gray-0)] shadow-sm transition-transform duration-200 ease-out");
+  const apply = () => {
+    track.className = [
+      "relative inline-flex h-5 w-8 shrink-0 items-center rounded-full transition-colors duration-200 ease-out",
+      input.checked ? "bg-token-charts-blue" : "bg-token-foreground/20",
+    ].join(" ");
+    knob.style.transform = input.checked ? "translateX(14px)" : "translateX(2px)";
+  };
+  input.addEventListener("change", apply);
+  apply();
+  track.append(knob);
+  root.append(input, track);
+  return { root, input };
+}
+
 function renderIssueList(state, project) {
   const wrap = document.createElement("div");
   wrap.setAttribute(VIEW_ATTR, "list");
   wrap.setAttribute("aria-label", "Project issue list");
 
   const visible = visibleIssueColumns(state);
-  const allIssues = state.board?.issues || [];
+  const allIssues = filteredIssues(state);
   const total = allIssues.filter((issue) => visible.some((c) => c.id === issue.status)).length;
 
   if (total === 0 && state.boardLoading) {
@@ -1473,6 +2504,11 @@ function renderIssueList(state, project) {
     empty.className = "flex h-40 items-center justify-center text-sm text-token-description-foreground";
     empty.textContent = "Loading...";
     wrap.append(empty);
+    return wrap;
+  }
+
+  if (total === 0 && hasIssueSearch(state)) {
+    wrap.append(renderSearchEmpty(state));
     return wrap;
   }
 
@@ -1504,6 +2540,7 @@ function renderIssueList(state, project) {
     const dot = document.createElement("span");
     dot.setAttribute("data-status-dot", "");
     dot.setAttribute("aria-hidden", "true");
+    applyStatusDotStyle(dot, column);
     const titleText = document.createElement("span");
     titleText.setAttribute("data-list-section-title", "");
     titleText.textContent = column.title;
@@ -1568,10 +2605,24 @@ function renderIssueRow(state, issue) {
   row.setAttribute(VIEW_ATTR, "list-row");
   row.dataset.status = issue.status || "backlog";
   row.dataset.issueId = issue.id;
+  const selected = isIssueSelected(state, issue.id);
+  if (selected) row.dataset.selected = "true";
+  row.setAttribute("aria-selected", String(selected));
   row.setAttribute("role", "button");
   row.setAttribute("tabindex", "0");
   row.draggable = true;
-  row.addEventListener("click", () => openIssueEditor(state, { mode: "edit", issue }));
+  row.addEventListener("click", (event) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey) {
+      event.preventDefault();
+      updateIssueSelectionFromEvent(state, issue.id, event);
+      return;
+    }
+    if (selectedIssueCount(state) > 0) {
+      updateIssueSelectionFromEvent(state, issue.id, event);
+      return;
+    }
+    openIssueEditor(state, { mode: "edit", issue });
+  });
   row.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
@@ -1602,6 +2653,7 @@ function renderIssueRow(state, issue) {
   const statusDot = document.createElement("span");
   statusDot.setAttribute("data-status-dot", "");
   statusDot.setAttribute("aria-hidden", "true");
+  applyStatusDotStyle(statusDot, columnForStatus(state, issue.status));
   statusCell.append(statusDot);
 
   const idCell = document.createElement("span");
@@ -1712,6 +2764,7 @@ function renderIssueEditor(state) {
   titleInput.setAttribute("data-editor-title", "");
   titleInput.value = issue.title || "";
   titleInput.autocomplete = "off";
+  if (!isEdit) titleInput.autofocus = true;
 
   const descInput = document.createElement("textarea");
   descInput.name = "description";
@@ -1774,19 +2827,18 @@ function renderIssueEditor(state) {
   const toolbar = document.createElement("div");
   toolbar.setAttribute("data-editor-toolbar", "");
 
-  const statusChip = createStatusChip(issue.status || editor.status || "backlog");
+  const statusChip = createStatusChip(state, issue.status || editor.status || firstIssueColumn(state).id);
   const priorityChip = createPriorityChip(issue.priority || "none");
-  const dueChip = createDueDateChip(issue.dueDate || "");
-  const assigneeChip = createTextChip("assignee", issue.assignee || "", "Assignee", personIconSvg());
-  const labelsChip = createTextChip(
-    "labels",
-    Array.isArray(issue.labels) ? issue.labels.join(", ") : (issue.labels || ""),
-    "Labels",
-    tagIconSvg(),
-    { placeholder: "bug, ui" },
-  );
+  const dueChip = createDueDateChip(state, issue.dueDate || "");
+  const labelsChip = createLabelsChip(state, Array.isArray(issue.labels) ? issue.labels : []);
 
-  toolbar.append(statusChip, priorityChip, dueChip, assigneeChip, labelsChip);
+  // Preserve assignee value across save (no UI for it in the editor).
+  const assigneeHidden = document.createElement("input");
+  assigneeHidden.type = "hidden";
+  assigneeHidden.name = "assignee";
+  assigneeHidden.value = issue.assignee || "";
+
+  toolbar.append(statusChip, priorityChip, dueChip, labelsChip, assigneeHidden);
 
   // Error
   const error = document.createElement("div");
@@ -1901,26 +2953,36 @@ function renderIssueEditor(state) {
   panel.append(form);
   backdrop.append(panel);
 
-  window.setTimeout(() => {
-    titleInput.focus();
-    if (!isEdit) titleInput.select();
-  }, 0);
+  focusIssueTitleInput(titleInput, { select: !isEdit });
 
   return backdrop;
 }
 
-function createStatusChip(value) {
+function focusIssueTitleInput(input, options = {}) {
+  if (!(input instanceof HTMLInputElement)) return;
+  const focus = () => {
+    if (!input.isConnected) return;
+    input.focus({ preventScroll: true });
+    if (options.select) input.select();
+  };
+  focus();
+  window.requestAnimationFrame(focus);
+  for (const delay of [0, 16, 60, 140]) window.setTimeout(focus, delay);
+}
+
+function createStatusChip(state, value) {
   const chip = document.createElement("label");
   chip.setAttribute("data-editor-chip", "");
   chip.dataset.status = value;
   const dot = document.createElement("span");
   dot.setAttribute("data-status-dot", "");
   dot.setAttribute("aria-hidden", "true");
+  applyStatusDotStyle(dot, columnForStatus(state, value));
   const text = document.createElement("span");
-  text.textContent = columnTitle(value);
+  text.textContent = columnTitle(value, issueColumns(state));
   const select = document.createElement("select");
   select.name = "status";
-  for (const column of ISSUE_COLUMNS) {
+  for (const column of issueColumns(state)) {
     const opt = document.createElement("option");
     opt.value = column.id;
     opt.textContent = column.title;
@@ -1929,7 +2991,8 @@ function createStatusChip(value) {
   select.value = value;
   select.addEventListener("change", () => {
     chip.dataset.status = select.value;
-    text.textContent = columnTitle(select.value);
+    text.textContent = columnTitle(select.value, issueColumns(state));
+    applyStatusDotStyle(dot, columnForStatus(state, select.value));
   });
   chip.append(dot, text, select);
   return chip;
@@ -1958,22 +3021,181 @@ function createPriorityChip(value) {
   return chip;
 }
 
-function createDueDateChip(value) {
-  const chip = document.createElement("label");
+function createDueDateChip(state, value) {
+  const chip = document.createElement("button");
+  chip.type = "button";
   chip.setAttribute("data-editor-chip", "");
   const icon = document.createElement("span");
   icon.innerHTML = calendarIconSvg();
   const text = document.createElement("span");
-  text.textContent = value ? formatDueDate(value) : "Due date";
+  const hidden = document.createElement("input");
+  hidden.type = "hidden";
+  hidden.name = "dueDate";
+
+  const apply = (next) => {
+    hidden.value = next || "";
+    if (next) {
+      text.textContent = formatDueDate(next);
+      text.style.opacity = "1";
+    } else {
+      text.textContent = "Due date";
+      text.style.opacity = ".7";
+    }
+  };
+  apply(value || "");
+
+  chip.append(icon, text, hidden);
+  chip.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openDueDatePopover(state, chip, hidden.value, apply);
+  });
+  return chip;
+}
+
+function openDueDatePopover(state, anchor, currentValue, onChange) {
+  closeProjectHomeContextMenu(state);
+  const menu = document.createElement("div");
+  menu.setAttribute(CONTEXT_MENU_ATTR, "root");
+  menu.setAttribute("role", "menu");
+  appendSheetHeader(menu, "Set due date");
+
+  const wrap = document.createElement("div");
+  wrap.style.padding = "8px";
   const input = document.createElement("input");
   input.type = "date";
-  input.name = "dueDate";
-  input.value = value || "";
+  input.value = currentValue || "";
+  input.style.width = "100%";
+  input.style.padding = "6px 8px";
+  input.style.border = "1px solid var(--color-token-border, rgba(0,0,0,.18))";
+  input.style.borderRadius = "6px";
+  input.style.background = "transparent";
+  input.style.color = "inherit";
+  input.style.font = "inherit";
   input.addEventListener("change", () => {
-    text.textContent = input.value ? formatDueDate(input.value) : "Due date";
+    onChange(input.value || "");
+    closeProjectHomeContextMenu(state);
   });
-  chip.append(icon, text, input);
+  wrap.append(input);
+  menu.append(wrap);
+
+  if (currentValue) {
+    menu.append(contextMenuItem("Clear due date", emptyIconSvg(), () => {
+      onChange("");
+    }));
+  }
+
+  document.body.append(menu);
+  positionSheetNearAnchor(menu, anchor);
+  state.contextMenu = menu;
+  window.setTimeout(() => installContextMenuDismiss(state, menu), 0);
+  window.setTimeout(() => input.focus(), 0);
+}
+
+function createLabelsChip(state, labels) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.setAttribute("data-editor-chip", "");
+  const iconEl = document.createElement("span");
+  iconEl.innerHTML = tagIconSvg();
+  const text = document.createElement("span");
+  const hidden = document.createElement("input");
+  hidden.type = "hidden";
+  hidden.name = "labels";
+
+  const apply = (next) => {
+    const list = Array.isArray(next) ? next : [];
+    hidden.value = list.join(",");
+    if (list.length) {
+      text.textContent = list.join(", ");
+      text.style.opacity = "1";
+    } else {
+      text.textContent = "Labels";
+      text.style.opacity = ".7";
+    }
+  };
+  apply(labels);
+
+  chip.append(iconEl, text, hidden);
+  chip.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const current = hidden.value
+      ? hidden.value.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    openLabelsPopover(state, chip, current, apply);
+  });
   return chip;
+}
+
+function openLabelsPopover(state, anchor, currentLabels, onChange) {
+  closeProjectHomeContextMenu(state);
+  const menu = document.createElement("div");
+  menu.setAttribute(CONTEXT_MENU_ATTR, "root");
+  menu.setAttribute("role", "menu");
+  appendSheetHeader(menu, "Toggle labels");
+  appendSheetSearch(menu, "Filter labels\u2026");
+
+  const selected = new Set(currentLabels);
+  const known = new Set(DEFAULT_LABELS);
+  for (const item of state.board?.issues || []) {
+    for (const label of item.labels || []) known.add(label);
+  }
+  for (const label of selected) known.add(label);
+  const sorted = Array.from(known).sort((a, b) => a.localeCompare(b));
+
+  const list = document.createElement("div");
+  list.setAttribute("data-labels-list", "");
+
+  const rebuildItems = () => {
+    list.innerHTML = "";
+    for (const label of sorted) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.setAttribute(CONTEXT_MENU_ATTR, "item");
+      item.setAttribute("role", "menuitemcheckbox");
+      item.setAttribute("aria-checked", String(selected.has(label)));
+      item.innerHTML = selected.has(label) ? checkIconSvg() : emptyIconSvg();
+      const span = document.createElement("span");
+      span.className = "min-w-0 flex-1 truncate";
+      span.textContent = label;
+      item.append(span);
+      item.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (selected.has(label)) selected.delete(label);
+        else selected.add(label);
+        onChange(Array.from(selected));
+        rebuildItems();
+      });
+      list.append(item);
+    }
+  };
+  rebuildItems();
+  menu.append(list);
+
+  menu.append(contextMenuItem("Add label\u2026", plusIconSvg(), () => {
+    const value = window.prompt("Label name");
+    const trimmed = value && value.trim();
+    if (!trimmed) return;
+    if (!sorted.includes(trimmed)) sorted.push(trimmed);
+    sorted.sort((a, b) => a.localeCompare(b));
+    selected.add(trimmed);
+    onChange(Array.from(selected));
+    rebuildItems();
+  }));
+  if (selected.size > 0) {
+    menu.append(contextMenuItem("Clear labels", emptyIconSvg(), () => {
+      selected.clear();
+      onChange([]);
+      rebuildItems();
+    }));
+  }
+
+  document.body.append(menu);
+  positionSheetNearAnchor(menu, anchor);
+  state.contextMenu = menu;
+  window.setTimeout(() => installContextMenuDismiss(state, menu), 0);
 }
 
 function createTextChip(name, value, placeholder, icon, options = {}) {
@@ -2027,6 +3249,9 @@ function renderIssueCard(state, project, issue) {
   card.setAttribute("tabindex", "0");
   card.dataset.issueId = issue.id;
   card.dataset.status = issue.status || "backlog";
+  const selected = isIssueSelected(state, issue.id);
+  if (selected) card.dataset.selected = "true";
+  card.setAttribute("aria-selected", String(selected));
   card.className = "group flex flex-col gap-1.5 px-3 py-2.5";
   card.addEventListener("dragstart", (event) => {
     state.dragIssueId = issue.id;
@@ -2046,6 +3271,15 @@ function renderIssueCard(state, project, issue) {
   });
   card.addEventListener("click", (event) => {
     if (event.target instanceof Element && event.target.closest("button")) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey) {
+      event.preventDefault();
+      updateIssueSelectionFromEvent(state, issue.id, event);
+      return;
+    }
+    if (selectedIssueCount(state) > 0) {
+      updateIssueSelectionFromEvent(state, issue.id, event);
+      return;
+    }
     openIssueEditor(state, { mode: "edit", issue });
   });
 
@@ -2057,6 +3291,7 @@ function renderIssueCard(state, project, issue) {
   const dot = document.createElement("span");
   dot.setAttribute("data-status-dot", "");
   dot.setAttribute("aria-hidden", "true");
+  applyStatusDotStyle(dot, columnForStatus(state, issue.status));
   const id = document.createElement("div");
   id.setAttribute(VIEW_ATTR, "issue-id");
   id.textContent = issue.id;
@@ -2159,6 +3394,7 @@ function labelHue(value) {
 function projectHomeToolbarButton(label, icon) {
   const button = document.createElement("button");
   button.type = "button";
+  button.style.webkitAppRegion = "no-drag";
   button.className =
     "flex size-8 items-center justify-center rounded-md text-token-description-foreground hover:bg-token-list-hover-background hover:text-token-foreground focus-visible:outline-token-border focus-visible:outline-2";
   button.setAttribute("aria-label", label);
@@ -2195,6 +3431,39 @@ async function moveIssue(state, issueId, status) {
     issueId,
     status,
   });
+}
+
+async function moveSelectedIssues(state, status) {
+  const project = state.current;
+  if (!project?.path || !status) return;
+  const issues = selectedIssues(state);
+  if (!issues.length) return;
+  ensureStatusVisible(state, status);
+  for (const issue of issues) {
+    await state.api.ipc.invoke(IPC_ISSUE_MOVE, {
+      projectPath: project.path,
+      issueId: issue.id,
+      status,
+    });
+    if (linearSyncReady(state.board)) {
+      await syncProjectLinearIssues(state, { projectPath: project.path, issueId: issue.id, pull: false });
+    }
+  }
+  clearIssueSelection(state, { render: false });
+  await loadProjectHomeBoard(state, project, { force: true });
+}
+
+async function deleteSelectedIssues(state, issues) {
+  const project = state.current;
+  if (!project?.path) return;
+  for (const issue of issues) {
+    await state.api.ipc.invoke(IPC_ISSUE_DELETE, {
+      projectPath: project.path,
+      issueId: issue.id,
+    });
+  }
+  clearIssueSelection(state, { render: false });
+  await loadProjectHomeBoard(state, project, { force: true });
 }
 
 async function setIssueLabels(state, issue, labels) {
@@ -2279,18 +3548,39 @@ async function mutateBoard(state, channel, payload) {
     const result = await state.api.ipc.invoke(channel, payload);
     const board = result?.board || result;
     if (board) state.board = normalizeBoard(board);
+    const issueId = result?.issue?.id || payload?.issueId || "";
+    if (issueId && channel !== IPC_ISSUE_DELETE && linearSyncReady(state.board)) {
+      syncIssueToLinearInBackground(state, payload.projectPath, issueId);
+    }
     state.boardError = "";
     renderProjectHomeView(state);
+    return result;
   } catch (error) {
     state.boardError = error?.message || String(error);
     renderProjectHomeView(state);
+    throw error;
   }
+}
+
+function syncIssueToLinearInBackground(state, projectPath, issueId) {
+  if (!projectPath || !issueId) return;
+  window.setTimeout(async () => {
+    try {
+      await syncProjectLinearIssues(state, { projectPath, issueId, pull: false });
+      state.boardError = "";
+      renderProjectHomeView(state);
+    } catch (error) {
+      state.boardError = `Linear sync failed: ${error?.message || String(error)}`;
+      renderProjectHomeView(state);
+    }
+  }, 0);
 }
 
 function ensureStatusVisible(state, status) {
   const value = String(status || "").trim();
-  if (!value || state.visibleColumns?.has?.(value)) return;
-  const next = new Set(state.visibleColumns);
+  const visible = state.visibleColumns instanceof Set ? state.visibleColumns : new Set();
+  if (!value || visible.size === 0 || visible.has(value)) return;
+  const next = new Set(visible);
   next.add(value);
   state.visibleColumns = next;
   state.api.storage?.set?.(VISIBLE_COLUMNS_STORAGE_KEY, Array.from(next));
@@ -2299,9 +3589,48 @@ function ensureStatusVisible(state, status) {
 
 function normalizeBoard(board) {
   return {
+    projectPath: board?.projectPath || "",
+    key: board?.key || "",
     columns: Array.isArray(board?.columns) ? board.columns : ISSUE_COLUMNS,
     issues: Array.isArray(board?.issues) ? board.issues : [],
+    settings: board?.settings && typeof board.settings === "object" ? board.settings : { linear: {} },
   };
+}
+
+function filteredIssues(state) {
+  const issues = Array.isArray(state.board?.issues) ? state.board.issues : [];
+  const query = normalizeSearchQuery(state.searchQuery);
+  if (!query) return issues;
+  return issues.filter((issue) => issueMatchesSearch(issue, query));
+}
+
+function hasIssueSearch(state) {
+  return normalizeSearchQuery(state.searchQuery).length > 0;
+}
+
+function issueMatchesSearch(issue, query) {
+  const haystack = [
+    issue.id,
+    issue.title,
+    issue.description,
+    issue.status,
+    columnTitle(issue.status),
+    issue.priority,
+    issue.assignee,
+    issue.dueDate,
+    ...(Array.isArray(issue.labels) ? issue.labels : []),
+    ...(Array.isArray(issue.comments) ? issue.comments.flatMap((comment) => [
+      comment.body,
+      comment.author,
+    ]) : []),
+    issue.linear?.identifier,
+    issue.linear?.url,
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+  return haystack.includes(query);
+}
+
+function normalizeSearchQuery(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function openIssueContextMenu(state, issue, x, y) {
@@ -2309,11 +3638,24 @@ function openIssueContextMenu(state, issue, x, y) {
   const menu = document.createElement("div");
   menu.setAttribute(CONTEXT_MENU_ATTR, "root");
   menu.setAttribute("role", "menu");
+  const selected = isIssueSelected(state, issue.id) ? selectedIssues(state) : [];
+  if (selected.length > 1) {
+    menu.append(contextMenuSubmenu(`${selected.length} selected`, columnsIconSvg(),
+      issueColumns(state).map((column) => ({
+        label: `Move to ${column.title}`,
+        checked: false,
+        action: () => moveSelectedIssues(state, column.id),
+      }))));
+    menu.append(contextMenuItem(`Delete ${selected.length} selected`, trashIconSvg(), () =>
+      confirmDeleteIssues(state, selected)));
+    menu.append(contextMenuItem("Clear selection", xIconSvg(), () =>
+      clearIssueSelection(state)));
+  }
 
   menu.append(contextMenuItem("Edit details", editIconSvg(), () =>
     openIssueEditor(state, { mode: "edit", issue })));
   menu.append(contextMenuSubmenu("Change status", columnsIconSvg(),
-    ISSUE_COLUMNS.map((column) => ({
+    issueColumns(state).map((column) => ({
       label: column.title,
       checked: column.id === issue.status,
       action: () => moveIssue(state, issue.id, column.id),
@@ -2362,7 +3704,7 @@ function openIssuePropertySheet(state, issue, kind, anchor) {
   if (kind === "status") {
     appendSheetHeader(menu, "Set status");
     appendSheetSearch(menu, "Filter status\u2026");
-    for (const column of ISSUE_COLUMNS) {
+    for (const column of issueColumns(state)) {
       menu.append(contextMenuItem(
         column.title,
         column.id === issue.status ? checkIconSvg() : emptyIconSvg(),
@@ -2542,6 +3884,12 @@ async function updateIssueField(state, issue, patch) {
 
 function confirmDeleteIssue(state, issue) {
   if (!issue?.id || !state.current?.path) return;
+  confirmDeleteIssues(state, [issue]);
+}
+
+function confirmDeleteIssues(state, issues) {
+  const targets = Array.isArray(issues) ? issues.filter((issue) => issue?.id) : [];
+  if (!targets.length || !state.current?.path) return;
   closeProjectHomeContextMenu(state);
   const backdrop = document.createElement("div");
   backdrop.setAttribute(VIEW_ATTR, "editor-backdrop");
@@ -2557,7 +3905,7 @@ function confirmDeleteIssue(state, issue) {
   head.setAttribute("data-editor-head", "");
   const crumb = document.createElement("div");
   crumb.setAttribute("data-editor-crumb", "");
-  crumb.textContent = `Delete ${issue.id}`;
+  crumb.textContent = targets.length === 1 ? `Delete ${targets[0].id}` : `Delete ${targets.length} issues`;
   head.append(crumb);
   panel.append(head);
 
@@ -2569,7 +3917,9 @@ function confirmDeleteIssue(state, issue) {
   const title = document.createElement("div");
   title.style.fontWeight = "500";
   title.style.marginBottom = "4px";
-  title.textContent = issue.title || "Untitled issue";
+  title.textContent = targets.length === 1
+    ? targets[0].title || "Untitled issue"
+    : targets.map((issue) => issue.id).join(", ");
   const note = document.createElement("div");
   note.style.color = "var(--color-token-description-foreground, currentColor)";
   note.textContent = "This issue will be permanently deleted. This can't be undone.";
@@ -2592,8 +3942,17 @@ function confirmDeleteIssue(state, issue) {
   const confirm = document.createElement("button");
   confirm.type = "button";
   confirm.className =
-    "rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500";
+    "rounded-md px-3 py-1.5 text-xs font-medium";
+  confirm.style.background = "#dc2626";
+  confirm.style.color = "#fff";
+  confirm.style.border = "1px solid rgba(220, 38, 38, .9)";
   confirm.textContent = "Delete";
+  confirm.addEventListener("mouseenter", () => {
+    confirm.style.background = "#b91c1c";
+  });
+  confirm.addEventListener("mouseleave", () => {
+    confirm.style.background = "#dc2626";
+  });
   actions.append(cancel, confirm);
   foot.append(hint, actions);
   panel.append(foot);
@@ -2607,10 +3966,7 @@ function confirmDeleteIssue(state, issue) {
   };
   const doDelete = async () => {
     close();
-    await mutateBoard(state, IPC_ISSUE_DELETE, {
-      projectPath: state.current.path,
-      issueId: issue.id,
-    });
+    await deleteSelectedIssues(state, targets);
   };
   const onKey = (event) => {
     if (event.key === "Escape") {
@@ -2802,7 +4158,11 @@ function installContextMenuDismiss(state, menu) {
     closeProjectHomeContextMenu(state);
   }, true);
   document.addEventListener("keydown", state.closeContextMenuOnKey = (event) => {
-    if (event.key === "Escape") closeProjectHomeContextMenu(state);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeProjectHomeContextMenu(state);
+    }
   }, true);
 }
 
@@ -2840,24 +4200,106 @@ function formatDateTime(value) {
   });
 }
 
-function columnTitle(status) {
-  return ISSUE_COLUMNS.find((column) => column.id === status)?.title || status || "Backlog";
+function columnTitle(status, columns = ISSUE_COLUMNS) {
+  return columns.find((column) => column.id === status)?.title || status || "Backlog";
 }
 
 function visibleIssueColumns(state) {
-  const visible = state.visibleColumns instanceof Set ? state.visibleColumns : new Set();
-  const columns = ISSUE_COLUMNS.filter((column) => visible.has(column.id));
-  return columns.length > 0 ? columns : ISSUE_COLUMNS;
+  const columns = issueColumns(state);
+  const visible = effectiveVisibleColumnIds(state);
+  return columns.filter((column) => visible.has(column.id));
+}
+
+function issueColumns(state) {
+  const columns = Array.isArray(state?.board?.columns) && state.board.columns.length
+    ? state.board.columns
+    : ISSUE_COLUMNS;
+  return normalizeIssueColumns(columns);
+}
+
+function firstIssueColumn(state) {
+  return issueColumns(state)[0] || ISSUE_COLUMNS[0];
+}
+
+function columnForStatus(state, status) {
+  return issueColumns(state).find((column) => column.id === status) || { id: status || "backlog", title: columnTitle(status) };
+}
+
+function normalizeIssueColumns(columns) {
+  const seen = new Set();
+  const result = [];
+  for (const column of Array.isArray(columns) ? columns : []) {
+    const id = String(column?.id || "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    result.push({ ...column, id, title: String(column.title || id).trim() || id });
+  }
+  return result.length ? result : ISSUE_COLUMNS;
 }
 
 function toggleVisibleColumn(state, columnId) {
-  const next = new Set(state.visibleColumns);
+  const columns = issueColumns(state);
+  const next = effectiveVisibleColumnIds(state);
   if (next.has(columnId) && next.size > 1) next.delete(columnId);
   else next.add(columnId);
+  if (next.size === columns.length) {
+    state.visibleColumns = new Set();
+    state.api.storage?.set?.(VISIBLE_COLUMNS_STORAGE_KEY, []);
+    renderProjectHomeView(state);
+    syncHeaderForProjectHome(state);
+    return;
+  }
   state.visibleColumns = next;
   state.api.storage?.set?.(VISIBLE_COLUMNS_STORAGE_KEY, Array.from(next));
   renderProjectHomeView(state);
   syncHeaderForProjectHome(state);
+}
+
+function effectiveVisibleColumnIds(state) {
+  const columns = issueColumns(state);
+  const allowed = new Set(columns.map((column) => column.id));
+  const stored = state.visibleColumns instanceof Set ? state.visibleColumns : new Set();
+  const selected = Array.from(stored).filter((id) => allowed.has(id));
+  return new Set(selected.length ? selected : columns.map((column) => column.id));
+}
+
+function isColumnVisible(state, columnId) {
+  return effectiveVisibleColumnIds(state).has(columnId);
+}
+
+function applyStatusDotStyle(dot, column) {
+  const visual = statusVisual(column);
+  dot.style.setProperty("--project-home-status-color", visual.color);
+  dot.style.color = visual.color;
+  dot.style.background = statusDotBackground(visual.fill);
+  dot.style.boxShadow = visual.dotted ? "none" : "";
+  dot.style.border = visual.dotted ? "1.5px dotted currentColor" : "";
+  dot.style.position = visual.check ? "relative" : "";
+  dot.innerHTML = visual.check ? statusCheckSvg() : "";
+}
+
+function statusVisual(column = {}) {
+  const type = String(column.linearType || "").toLowerCase();
+  const title = String(column.title || column.id || "").toLowerCase();
+  const id = String(column.id || "").toLowerCase();
+  if (type === "completed" || id === "done" || title.includes("done") || title.includes("complete")) return { color: "#6366f1", fill: "full", check: true };
+  if (type === "canceled" || title.includes("cancel")) return { color: "#ef4444", fill: "full" };
+  if (title.includes("duplicate")) return { color: "#f97316", fill: "full" };
+  if (title.includes("review")) return { color: "#10b981", fill: "three-quarter" };
+  if (type === "started" || id === "in_progress" || title.includes("progress")) return { color: "#f59e0b", fill: "half" };
+  if (type === "backlog" || id === "backlog" || title.includes("backlog")) return { color: "#71717a", fill: "none", dotted: true };
+  return { color: "#a1a1aa", fill: "none" };
+}
+
+function statusDotBackground(fill) {
+  if (fill === "full" || fill === true) return "currentColor";
+  if (fill === "three-quarter") return "conic-gradient(currentColor 0 75%, transparent 75% 100%)";
+  if (fill === "half") return "conic-gradient(currentColor 0 50%, transparent 50% 100%)";
+  return "transparent";
+}
+
+function statusCheckSvg() {
+  return '<svg viewBox="0 0 12 12" aria-hidden="true" style="display:block;width:100%;height:100%;color:white"><path d="M3.1 6.2 5 8.1l4-4.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 }
 
 function toggleSectionCollapsed(state, columnId) {
@@ -2880,24 +4322,88 @@ function closeIssueEditor(state) {
   renderProjectHomeView(state);
 }
 
+function updateIssueSearch(state, value) {
+  const next = String(value || "").replace(/\s+/g, " ").trim();
+  if (state.searchQuery === next) return;
+  state.searchQuery = next;
+  state.api.storage?.set?.(SEARCH_QUERY_STORAGE_KEY, next);
+  renderProjectHomeView(state);
+}
+
+function selectedIssueCount(state) {
+  return state.selectedIssueIds instanceof Set ? state.selectedIssueIds.size : 0;
+}
+
+function isIssueSelected(state, issueId) {
+  return state.selectedIssueIds instanceof Set && state.selectedIssueIds.has(issueId);
+}
+
+function selectedIssues(state) {
+  const ids = state.selectedIssueIds instanceof Set ? state.selectedIssueIds : new Set();
+  return orderedIssues(state).filter((issue) => ids.has(issue.id));
+}
+
+function orderedIssues(state) {
+  const visible = new Set(visibleIssueColumns(state).map((column) => column.id));
+  return filteredIssues(state)
+    .filter((issue) => visible.has(issue.status))
+    .sort((a, b) => {
+      const columnOrder = issueColumns(state).findIndex((column) => column.id === a.status) -
+        issueColumns(state).findIndex((column) => column.id === b.status);
+      if (columnOrder) return columnOrder;
+      const rankDiff = (Number(a.rank) || 0) - (Number(b.rank) || 0);
+      if (rankDiff) return rankDiff;
+      return String(a.id).localeCompare(String(b.id));
+    });
+}
+
+function updateIssueSelectionFromEvent(state, issueId, event = {}) {
+  if (!issueId) return;
+  const selected = new Set(state.selectedIssueIds instanceof Set ? state.selectedIssueIds : []);
+  if (event.shiftKey && state.lastSelectedIssueId) {
+    const ordered = orderedIssues(state).map((issue) => issue.id);
+    const start = ordered.indexOf(state.lastSelectedIssueId);
+    const end = ordered.indexOf(issueId);
+    if (start >= 0 && end >= 0) {
+      for (const id of ordered.slice(Math.min(start, end), Math.max(start, end) + 1)) selected.add(id);
+    } else {
+      selected.add(issueId);
+    }
+  } else if (selected.has(issueId)) {
+    selected.delete(issueId);
+  } else {
+    selected.add(issueId);
+  }
+  state.selectedIssueIds = selected;
+  state.lastSelectedIssueId = issueId;
+  renderProjectHomeView(state);
+}
+
+function clearIssueSelection(state, options = {}) {
+  state.selectedIssueIds = new Set();
+  state.lastSelectedIssueId = "";
+  if (options.render !== false) renderProjectHomeView(state);
+}
+
 function readStoredViewMode(api) {
   const mode = api.storage?.get?.(VIEW_MODE_STORAGE_KEY, "board");
-  return mode === "list" ? "list" : "board";
+  return ["board", "list"].includes(mode) ? mode : "board";
 }
 
 function readStoredVisibleColumns(api) {
   const stored = api.storage?.get?.(VISIBLE_COLUMNS_STORAGE_KEY, null);
-  const values = Array.isArray(stored) ? stored : ISSUE_COLUMNS.map((column) => column.id);
-  const allowed = new Set(ISSUE_COLUMNS.map((column) => column.id));
-  const visible = values.filter((value) => allowed.has(value));
-  return new Set(visible.length > 0 ? visible : ISSUE_COLUMNS.map((column) => column.id));
+  return new Set(Array.isArray(stored) ? stored.map((value) => String(value || "").trim()).filter(Boolean) : []);
 }
 
 function readStoredCollapsedSections(api) {
   const stored = api.storage?.get?.(COLLAPSED_SECTIONS_STORAGE_KEY, null);
-  const allowed = new Set(ISSUE_COLUMNS.map((column) => column.id));
-  const values = Array.isArray(stored) ? stored.filter((value) => allowed.has(value)) : [];
-  return new Set(values);
+  return new Set(Array.isArray(stored) ? stored.map((value) => String(value || "").trim()).filter(Boolean) : []);
+}
+
+function readStoredSearchQuery(api) {
+  return String(api.storage?.get?.(SEARCH_QUERY_STORAGE_KEY, "") || "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function sameProject(left, right) {
@@ -3254,6 +4760,7 @@ function renderProjectHomeHeader(state, node) {
   folder.setAttribute(HEADER_ATTR, "folder");
   folder.setAttribute("aria-label", `Open ${basenameFor(project.path, project.label || "Project")} folder`);
   folder.title = project.path || project.label || "";
+  folder.style.webkitAppRegion = "no-drag";
   folder.innerHTML = folderIconSvg();
   const folderName = document.createElement("span");
   folderName.className = "truncate";
@@ -3272,12 +4779,117 @@ function renderProjectHomeHeader(state, node) {
 
   const controls = document.createElement("div");
   controls.className = "flex shrink-0 items-center gap-2";
+  controls.style.webkitAppRegion = "no-drag";
   controls.append(
+    renderIssueSearch(state),
     renderViewModeToggle(state),
     renderColumnMenuButton(state),
+    renderProjectSettingsButton(state),
   );
 
   node.append(identity, controls);
+}
+
+function renderIssueSearch(state) {
+  const wrap = document.createElement("div");
+  wrap.setAttribute(VIEW_ATTR, "search");
+  wrap.setAttribute("role", "search");
+  wrap.dataset.hasQuery = hasIssueSearch(state) ? "true" : "false";
+  wrap.title = "Search issues";
+  wrap.style.pointerEvents = "auto";
+  wrap.style.position = "relative";
+  wrap.style.zIndex = "5";
+  wrap.style.webkitAppRegion = "no-drag";
+
+  const icon = document.createElement("span");
+  icon.innerHTML = searchIconSvg();
+
+  const input = document.createElement("input");
+  input.type = "search";
+  input.setAttribute("aria-label", "Search issues");
+  input.setAttribute("data-issue-search-input", "");
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.placeholder = "Search issues";
+  input.value = state.searchQuery || "";
+  input.tabIndex = 0;
+  input.style.pointerEvents = "auto";
+  input.style.webkitAppRegion = "no-drag";
+  const focusInput = () => {
+    if (input.isConnected) input.focus({ preventScroll: true });
+    for (const delay of [0, 16, 60, 140]) {
+      window.setTimeout(() => {
+        if (input.isConnected && document.activeElement !== input) input.focus({ preventScroll: true });
+      }, delay);
+    }
+  };
+  wrap.addEventListener("pointerenter", () => {
+    focusInput();
+  });
+  wrap.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+    if (!(event.target instanceof Element) || !event.target.closest("button")) {
+      focusInput();
+    }
+  }, true);
+  wrap.addEventListener("mousedown", (event) => {
+    event.stopPropagation();
+    if (!(event.target instanceof Element) || !event.target.closest("button")) {
+      focusInput();
+    }
+  }, true);
+  wrap.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (event.target !== input && (!(event.target instanceof Element) || !event.target.closest("button"))) {
+      focusInput();
+    }
+  }, true);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && input.value) {
+      event.preventDefault();
+      event.stopPropagation();
+      updateIssueSearch(state, "");
+      input.value = "";
+      input.focus();
+    }
+  });
+  input.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+  input.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+    focusInput();
+  }, true);
+  input.addEventListener("mousedown", (event) => {
+    event.stopPropagation();
+    focusInput();
+  }, true);
+  input.addEventListener("search", () => {
+    updateIssueSearch(state, input.value);
+    wrap.dataset.hasQuery = input.value.trim() ? "true" : "false";
+  });
+  input.addEventListener("input", () => {
+    updateIssueSearch(state, input.value);
+    wrap.dataset.hasQuery = input.value.trim() ? "true" : "false";
+  });
+
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.setAttribute("aria-label", "Clear issue search");
+  clear.setAttribute("data-issue-search-clear", "");
+  clear.style.webkitAppRegion = "no-drag";
+  clear.innerHTML = xIconSvg();
+  clear.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    updateIssueSearch(state, "");
+    input.value = "";
+    wrap.dataset.hasQuery = "false";
+    input.focus();
+  });
+
+  wrap.append(icon, input, clear);
+  return wrap;
 }
 
 function renderViewModeToggle(state) {
@@ -3286,7 +4898,8 @@ function renderViewModeToggle(state) {
   for (const mode of ["board", "list"]) {
     const button = document.createElement("button");
     button.type = "button";
-    button.setAttribute("aria-label", `${mode === "board" ? "Board" : "List"} view`);
+    const label = mode === "board" ? "Board" : "List";
+    button.setAttribute("aria-label", `${label} view`);
     button.setAttribute("aria-pressed", String(state.viewMode === mode));
     button.innerHTML = mode === "board" ? boardIconSvg() : listIconSvg();
     button.addEventListener("click", (event) => {
@@ -3305,6 +4918,13 @@ function renderColumnMenuButton(state) {
   return headerIconButton("Visible boards", columnsIconSvg(), (event, button) => {
     const rect = button.getBoundingClientRect();
     openColumnVisibilityMenu(state, rect.left, rect.bottom + 6);
+  });
+}
+
+function renderProjectSettingsButton(state) {
+  return headerIconButton("Project Home settings", settingsIconSvg(), () => {
+    state.settingsSheetOpen = true;
+    renderProjectHomeView(state);
   });
 }
 
@@ -3330,13 +4950,14 @@ function openColumnVisibilityMenu(state, x, y) {
   menu.setAttribute(CONTEXT_MENU_ATTR, "root");
   menu.setAttribute("role", "menu");
 
-  for (const column of ISSUE_COLUMNS) {
+  for (const column of issueColumns(state)) {
+    const checked = isColumnVisible(state, column.id);
     const item = document.createElement("button");
     item.type = "button";
     item.setAttribute(CONTEXT_MENU_ATTR, "item");
     item.setAttribute("role", "menuitemcheckbox");
-    item.setAttribute("aria-checked", String(state.visibleColumns.has(column.id)));
-    item.innerHTML = state.visibleColumns.has(column.id) ? checkIconSvg() : emptyIconSvg();
+    item.setAttribute("aria-checked", String(checked));
+    item.innerHTML = checked ? checkIconSvg() : emptyIconSvg();
     const text = document.createElement("span");
     text.className = "min-w-0 flex-1 truncate";
     text.textContent = column.title;
@@ -3407,6 +5028,11 @@ function mainSurface() {
 function isPlainKey(event, key) {
   if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return false;
   return String(event.key || "").toLowerCase() === key.toLowerCase();
+}
+
+function isFindShortcut(event) {
+  const key = String(event.key || "").toLowerCase();
+  return key === "f" && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && !event.repeat;
 }
 
 function isTypingTarget(target) {
@@ -3711,6 +5337,40 @@ function closestHomeButton(target) {
   return button instanceof HTMLButtonElement ? button : null;
 }
 
+function closestIssueSearch(target) {
+  if (!(target instanceof Element)) return null;
+  const search = target.closest(`[${VIEW_ATTR}="search"]`);
+  return search instanceof HTMLElement ? search : null;
+}
+
+function closestIssueSearchClear(target) {
+  if (!(target instanceof Element)) return null;
+  const clear = target.closest("[data-issue-search-clear]");
+  return clear instanceof HTMLButtonElement ? clear : null;
+}
+
+function focusIssueSearch(search) {
+  if (!(search instanceof HTMLElement)) return;
+  const input = search.querySelector("[data-issue-search-input]");
+  if (!(input instanceof HTMLInputElement)) return;
+  if (input.isConnected) input.focus({ preventScroll: true });
+  window.requestAnimationFrame(() => {
+    if (input.isConnected && document.activeElement !== input) input.focus({ preventScroll: true });
+  });
+  for (const delay of [0, 16, 60, 140]) {
+    window.setTimeout(() => {
+      if (input.isConnected && document.activeElement !== input) input.focus({ preventScroll: true });
+    }, delay);
+  }
+}
+
+function stopEventPropagation(event) {
+  event.stopPropagation();
+  if (typeof event.stopImmediatePropagation === "function") {
+    event.stopImmediatePropagation();
+  }
+}
+
 function externalNavigationTarget(state, target) {
   if (!(target instanceof Element)) return null;
   if (closestHomeButton(target)) return null;
@@ -3943,11 +5603,22 @@ function listIconSvg() {
   );
 }
 
+function settingsIconSvg() {
+  return iconSvg(
+    '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.52a2 2 0 0 1-1 1.72l-.15.1a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.52a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>' +
+      '<circle cx="12" cy="12" r="3"></circle>',
+  );
+}
+
 function columnsIconSvg() {
   return iconSvg(
     '<path d="M3 6h18"></path><path d="M3 12h18"></path><path d="M3 18h18"></path>' +
       '<path d="M8 6v12"></path><path d="M16 6v12"></path>',
   );
+}
+
+function searchIconSvg() {
+  return iconSvg('<circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path>');
 }
 
 function checkIconSvg() {

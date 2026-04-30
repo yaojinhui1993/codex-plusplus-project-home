@@ -42,6 +42,18 @@ function createIssueStore(options = {}) {
       return publicBoard(db);
     },
 
+    search(projectPath, query = "") {
+      const db = readProjectDb(issuesDir, projectPath, issueDefaults);
+      const board = publicBoard(db);
+      const needle = cleanText(query).toLowerCase();
+      if (!needle) return { ...board, query: "", issues: board.issues };
+      return {
+        ...board,
+        query: cleanText(query),
+        issues: board.issues.filter((issue) => issueMatchesQuery(issue, needle)),
+      };
+    },
+
     get(projectPath, issueId) {
       const db = readProjectDb(issuesDir, projectPath, issueDefaults);
       return db.issues.find((issue) => issue.id === issueId) || null;
@@ -168,6 +180,60 @@ function createIssueStore(options = {}) {
       writeProjectDb(issuesDir, db);
       return { issue, board: publicBoard(db) };
     },
+
+    updateSettings(projectPath, patch = {}) {
+      const db = readProjectDb(issuesDir, projectPath, issueDefaults);
+      db.settings = normalizeSettings({ ...(db.settings || {}), ...(patch || {}) });
+      writeProjectDb(issuesDir, db);
+      return publicBoard(db);
+    },
+
+    importLinear(projectPath, input = {}) {
+      const db = readProjectDb(issuesDir, projectPath, issueDefaults);
+      if (Array.isArray(input.columns) && input.columns.length) {
+        db.columns = normalizeColumns(input.columns, db.issues);
+      }
+      const imported = [];
+      for (const source of Array.isArray(input.issues) ? input.issues : []) {
+        const values = linearIssueValues(source);
+        if (!values.linear.id) continue;
+        let issue = db.issues.find((item) =>
+          item.linear?.id === values.linear.id ||
+          (values.linear.identifier && item.linear?.identifier === values.linear.identifier));
+        if (!issue) {
+          issue = {
+            id: nextIssueId(db),
+            title: values.title,
+            description: values.description,
+            status: values.status,
+            priority: values.priority,
+            labels: values.labels,
+            assignee: values.assignee,
+            dueDate: values.dueDate,
+            comments: [],
+            linear: values.linear,
+            rank: nextRank(db, values.status),
+            createdAt: values.createdAt,
+            updatedAt: values.updatedAt,
+          };
+          db.issues.push(issue);
+        } else {
+          issue.title = values.title;
+          issue.description = values.description;
+          issue.status = values.status;
+          issue.priority = values.priority;
+          issue.labels = values.labels;
+          issue.assignee = values.assignee;
+          issue.dueDate = values.dueDate;
+          issue.linear = normalizeLinear({ ...(issue.linear || {}), ...values.linear });
+          issue.updatedAt = values.updatedAt;
+        }
+        imported.push(issue.id);
+      }
+      normalizeRanks(db);
+      writeProjectDb(issuesDir, db);
+      return { imported, board: publicBoard(db) };
+    },
   };
 }
 
@@ -196,8 +262,9 @@ function writeProjectDb(issuesDir, db) {
   const payload = {
     projectPath: db.projectPath,
     key: db.key,
-    columns: DEFAULT_COLUMNS,
+    columns: normalizeColumns(db.columns, db.issues),
     issueDefaults: cloneIssueDefaults(db.issueDefaults),
+    settings: normalizeSettings(db.settings),
     nextNumber: db.nextNumber,
     issues: db.issues,
     updatedAt: new Date().toISOString(),
@@ -212,7 +279,9 @@ function normalizeDb(raw, projectPath, file, issueDefaults = ISSUE_DEFAULTS) {
     projectPath,
     key: projectKey(projectPath),
     file,
+    columns: normalizeColumns(raw.columns, issues),
     issueDefaults: defaults,
+    settings: normalizeSettings(raw.settings),
     nextNumber: Math.max(Number(raw.nextNumber) || 1, maxIssueNumber(issues) + 1),
     issues,
   };
@@ -245,8 +314,9 @@ function publicBoard(db) {
   return {
     projectPath: db.projectPath,
     key: db.key,
-    columns: DEFAULT_COLUMNS.map((column) => ({ ...column })),
+    columns: normalizeColumns(db.columns, db.issues),
     issueDefaults: cloneIssueDefaults(db.issueDefaults),
+    settings: normalizeSettings(db.settings),
     issues: [...db.issues].sort(compareIssueRank),
   };
 }
@@ -265,7 +335,41 @@ function cleanText(value) {
 
 function normalizeStatus(value) {
   const raw = cleanText(value).toLowerCase().replace(/[\s-]+/g, "_");
-  return DEFAULT_COLUMNS.some((column) => column.id === raw) ? raw : "backlog";
+  return raw || "backlog";
+}
+
+function normalizeColumns(columns, issues = []) {
+  const seen = new Set();
+  const result = [];
+  const hasExplicitColumns = Array.isArray(columns) && columns.length > 0;
+  const add = (column) => {
+    if (!column || typeof column !== "object") return;
+    const id = normalizeStatus(column.id || column.status || column.name || column.title);
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    const title = cleanText(column.title || column.name) || columnTitleFromId(id);
+    const normalized = {
+      id,
+      title,
+    };
+    const linearStateId = cleanText(column.linearStateId || column.stateId);
+    if (linearStateId) normalized.linearStateId = linearStateId;
+    const linearType = cleanText(column.linearType || column.type);
+    if (linearType) normalized.linearType = linearType;
+    result.push(normalized);
+  };
+  (hasExplicitColumns ? columns : DEFAULT_COLUMNS).forEach(add);
+  if (!hasExplicitColumns) {
+    for (const issue of Array.isArray(issues) ? issues : []) {
+      const status = normalizeStatus(issue?.status);
+      if (status && !seen.has(status)) add({ id: status, title: columnTitleFromId(status) });
+    }
+  }
+  return result.length ? result : DEFAULT_COLUMNS.map((column) => ({ ...column }));
+}
+
+function columnTitleFromId(id) {
+  return cleanText(id).replace(/^linear_/, "").replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()) || "Backlog";
 }
 
 function normalizePriority(value) {
@@ -354,10 +458,109 @@ function normalizeLinear(linear) {
     id: cleanText(linear.id),
     identifier: cleanText(linear.identifier),
     url: cleanText(linear.url),
+    stateId: cleanText(linear.stateId),
+    stateName: cleanText(linear.stateName),
     syncedAt: cleanText(linear.syncedAt),
     lastError: cleanText(linear.lastError),
   };
   return Object.fromEntries(Object.entries(result).filter(([, value]) => value));
+}
+
+function linearIssueValues(source) {
+  const state = source.state || {};
+  const status = linearStatusId(state);
+  const updatedAt = cleanText(source.updatedAt) || new Date().toISOString();
+  return {
+    title: cleanText(source.title) || cleanText(source.identifier) || "Untitled issue",
+    description: cleanText(source.description),
+    status,
+    priority: normalizeLinearPriority(source.priority),
+    labels: normalizeLabels(source.labels),
+    assignee: cleanText(source.assignee),
+    dueDate: normalizeDueDate(source.dueDate),
+    createdAt: cleanText(source.createdAt) || updatedAt,
+    updatedAt,
+    linear: normalizeLinear({
+      id: source.id,
+      identifier: source.identifier,
+      url: source.url,
+      stateId: state.id,
+      stateName: state.name,
+      syncedAt: new Date().toISOString(),
+      lastError: "",
+    }),
+  };
+}
+
+function normalizeLinearPriority(value) {
+  const number = Number(value);
+  if (number === 1) return "urgent";
+  if (number === 2) return "high";
+  if (number === 3) return "medium";
+  if (number === 4) return "low";
+  return normalizePriority(value);
+}
+
+function linearStatusId(state) {
+  const stateId = cleanText(state?.id);
+  if (stateId) return `linear_${stateId.replace(/[^A-Za-z0-9]+/g, "_").toLowerCase()}`;
+  return normalizeStatus(state?.name);
+}
+
+function normalizeSettings(settings) {
+  const source = settings && typeof settings === "object" ? settings : {};
+  return {
+    linear: normalizeLinearSettings(source.linear),
+  };
+}
+
+function normalizeLinearSettings(linear) {
+  if (!linear || typeof linear !== "object") {
+    return { enabled: false, teamId: "", apiKey: "", apiUrl: "", defaultSyncMode: "dryRun", assignedToMeOnly: false };
+  }
+  const defaultSyncMode = cleanText(linear.defaultSyncMode) === "write" ? "write" : "dryRun";
+  const apiKey = cleanLinearApiKey(linear.apiKey);
+  return {
+    enabled: Boolean(linear.enabled),
+    teamId: cleanText(linear.teamId),
+    apiKey,
+    apiUrl: cleanText(linear.apiUrl),
+    defaultSyncMode,
+    assignedToMeOnly: Boolean(linear.assignedToMeOnly),
+  };
+}
+
+function cleanLinearApiKey(value) {
+  const text = cleanText(value);
+  if (/^Error rendering page:/i.test(text)) return "";
+  return text;
+}
+
+function issueMatchesQuery(issue, needle) {
+  if (!needle) return true;
+  const haystack = [
+    issue.id,
+    issue.title,
+    issue.description,
+    issue.status,
+    columnTitle(issue.status),
+    issue.priority,
+    issue.assignee,
+    issue.dueDate,
+    ...(Array.isArray(issue.labels) ? issue.labels : []),
+    ...(Array.isArray(issue.comments) ? issue.comments.flatMap((comment) => [
+      comment.body,
+      comment.author,
+    ]) : []),
+    issue.linear?.identifier,
+    issue.linear?.url,
+  ].map(cleanText).join(" ").toLowerCase();
+  return haystack.includes(needle);
+}
+
+function columnTitle(status) {
+  const column = DEFAULT_COLUMNS.find((item) => item.id === status);
+  return column?.title || status || "";
 }
 
 function appendComment(issue, body, createdAt = new Date().toISOString(), author = "") {
@@ -399,7 +602,8 @@ function nextRank(db, status) {
 }
 
 function normalizeRanks(db) {
-  for (const column of DEFAULT_COLUMNS) {
+  const columns = normalizeColumns(db.columns, db.issues);
+  for (const column of columns) {
     db.issues
       .filter((issue) => issue.status === column.id)
       .sort(compareIssueRank)

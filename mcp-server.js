@@ -88,6 +88,8 @@ function callTool(name, args) {
   switch (name) {
     case "project_home_list_issues":
       return content(store.list(projectPath));
+    case "project_home_search_issues":
+      return content(store.search(projectPath, requireString(args.query, "query")));
     case "project_home_get_issue":
       return content(store.get(projectPath, requireString(args.issueId, "issueId")));
     case "project_home_create_issue":
@@ -114,7 +116,7 @@ function callTool(name, args) {
       return syncLinear(projectPath, args).then(content);
     case "project_home_columns":
       return content({
-        columns: DEFAULT_COLUMNS,
+        columns: store.list(projectPath).columns,
         priorities: PRIORITIES,
         issueDefaults: store.issueDefaults || ISSUE_DEFAULTS,
       });
@@ -129,11 +131,7 @@ function tools() {
     description: "Absolute path for the Codex project. Each project path has its own issue DB.",
   };
   const issueId = { type: "string", description: "Issue id, for example TWE-1 (prefix derived from the project folder name)." };
-  const status = {
-    type: "string",
-    enum: DEFAULT_COLUMNS.map((column) => column.id),
-    description: "Kanban column id.",
-  };
+  const status = { type: "string", description: "Kanban column id. When Linear sync is enabled, this can be a Linear workflow state column id." };
   const priority = { type: "string", enum: PRIORITIES };
   const labels = {
     oneOf: [
@@ -182,9 +180,11 @@ function tools() {
         properties: {
           projectPath,
           issueId: { type: "string", description: "Optional single issue id to sync. Omit to sync all issues." },
-          teamId: { type: "string", description: "Linear team UUID. Defaults to LINEAR_TEAM_ID." },
+          teamId: { type: "string", description: "Linear team UUID. Defaults to the saved Project Home setting, LINEAR_TEAM_ID, or the first team available to the API key." },
           apiKey: { type: "string", description: "Linear API key. Defaults to LINEAR_API_KEY or LINEAR_ACCESS_TOKEN." },
           dryRun: { type: "boolean", default: false, description: "When true, report planned creates/updates without writing Linear or local metadata." },
+          assignedToMeOnly: { type: "boolean", description: "When true, sync only issues whose Project Home assignee matches the Linear API viewer." },
+          pull: { type: "boolean", description: "When true, pull Linear workflow states and existing Linear issues into Project Home before pushing local changes." },
         },
         required: ["projectPath"],
       },
@@ -198,6 +198,18 @@ function tools() {
       name: "project_home_list_issues",
       description: "List all issues for a project.",
       inputSchema: { type: "object", properties: { projectPath }, required: ["projectPath"] },
+    },
+    {
+      name: "project_home_search_issues",
+      description: "Search issues by id, title, description, status, priority, label, assignee, due date, comment, or Linear metadata.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectPath,
+          query: { type: "string", description: "Case-insensitive text to search for across issue fields." },
+        },
+        required: ["projectPath", "query"],
+      },
     },
     {
       name: "project_home_get_issue",
@@ -308,6 +320,7 @@ function helpText(toolName) {
       "- project_home_help          show this help (optional `tool` arg for focused help).",
       "- project_home_columns       list column ids, priorities, and issue defaults.",
       "- project_home_list_issues   list every issue in the project.",
+      "- project_home_search_issues search issues across common fields.",
       "- project_home_get_issue     fetch a single issue by id.",
       "- project_home_create_issue  create a new issue.",
       "- project_home_update_issue  patch any issue field, optionally append a comment.",
@@ -339,6 +352,15 @@ function helpText(toolName) {
       "Args:",
       "  projectPath (required).",
       "Returns: { projectPath, key, columns, issueDefaults, issues[] } sorted by status then rank.",
+    ].join("\n"),
+
+    project_home_search_issues: [
+      "project_home_search_issues",
+      "Args:",
+      "  projectPath (required).",
+      "  query       (required) — case-insensitive text matched against id, title, description, status, priority, labels, assignee, due date, comments, and Linear metadata.",
+      "Returns: { projectPath, key, columns, issueDefaults, query, issues[] } with matching issues sorted by status then rank.",
+      "Use this before list_issues when you only need issues matching a term.",
     ].join("\n"),
 
     project_home_get_issue: [
@@ -409,9 +431,10 @@ function helpText(toolName) {
       "Args:",
       "  projectPath (required).",
       "  issueId     (optional) — sync only one local issue.",
-      "  teamId      (optional) — Linear team UUID; defaults to LINEAR_TEAM_ID.",
+      "  teamId      (optional) — Linear team UUID; defaults to saved settings, LINEAR_TEAM_ID, or the first team available to the API key.",
       "  apiKey      (optional) — Linear API key; defaults to LINEAR_API_KEY or LINEAR_ACCESS_TOKEN.",
       "  dryRun      (boolean)  — report planned creates/updates without writing.",
+      "  pull        (boolean)  — pull Linear workflow states and existing team issues before pushing.",
       "Behavior:",
       "  Creates Linear issues for local issues without linear.id.",
       "  Updates Linear issues for local issues with linear.id.",
@@ -431,31 +454,52 @@ function helpText(toolName) {
 }
 
 async function syncLinear(projectPath, args = {}) {
-  const apiKey = requireLinearApiKey(args);
-  const teamId = requireString(args.teamId || process.env.LINEAR_TEAM_ID, "teamId");
-  const dryRun = Boolean(args.dryRun);
   const board = store.list(projectPath);
+  const linearSettings = board.settings?.linear || {};
+  const apiKey = requireLinearApiKey(args, linearSettings);
+  const dryRun = Boolean(args.dryRun);
   const issues = board.issues.filter((issue) => !args.issueId || issue.id === args.issueId);
   if (args.issueId && issues.length === 0) throw new Error(`Issue not found: ${args.issueId}`);
 
-  const client = createLinearClient(apiKey, args.apiUrl || process.env.LINEAR_API_URL);
+  const client = createLinearClient(apiKey, args.apiUrl || linearSettings.apiUrl || process.env.LINEAR_API_URL);
+  const teamId = await resolveLinearTeamId(client, args.teamId || linearSettings.teamId || process.env.LINEAR_TEAM_ID);
   const states = await client.teamStates(teamId);
+  let boardAfterPull = board;
+  let pulled = { imported: [], columns: [] };
+  if (args.pull && !dryRun) {
+    const linearIssues = await client.issues(teamId);
+    const imported = store.importLinear(projectPath, {
+      columns: linearColumnsFromStates(states),
+      issues: linearIssues.map(linearIssueFromApi),
+    });
+    boardAfterPull = imported.board;
+    pulled = { imported: imported.imported, columns: imported.board.columns };
+  }
+  const assignedToMeOnly = Boolean(args.assignedToMeOnly || linearSettings.assignedToMeOnly);
+  const viewer = assignedToMeOnly ? await client.viewer() : null;
+  const skipped = [];
   const synced = [];
   const failed = [];
+  const syncBoard = args.pull && !dryRun ? boardAfterPull : board;
+  const syncIssues = syncBoard.issues.filter((issue) => !args.issueId || issue.id === args.issueId);
 
-  for (const issue of issues) {
+  for (const issue of syncIssues) {
     const planned = {
       issueId: issue.id,
       action: issue.linear?.id ? "update" : "create",
       linearId: issue.linear?.id || "",
       title: issue.title,
     };
+    if (assignedToMeOnly && !issueAssignedToViewer(issue, viewer)) {
+      skipped.push({ ...planned, reason: "not_assigned_to_viewer", assignee: issue.assignee || "" });
+      continue;
+    }
     if (dryRun) {
       synced.push(planned);
       continue;
     }
     try {
-      const input = linearIssueInput(issue, teamId, states);
+      const input = linearIssueInput(issue, teamId, states, syncBoard.columns);
       const linearIssue = issue.linear?.id
         ? await client.updateIssue(issue.linear.id, input)
         : await client.createIssue(input);
@@ -480,23 +524,34 @@ async function syncLinear(projectPath, args = {}) {
     }
   }
 
-  return { dryRun, teamId, synced, failed, board: store.list(projectPath) };
+  return { dryRun, teamId, assignedToMeOnly, pulled, skipped, synced, failed, board: store.list(projectPath) };
 }
 
-function requireLinearApiKey(args = {}) {
-  const key = String(args.apiKey || process.env.LINEAR_API_KEY || process.env.LINEAR_ACCESS_TOKEN || "").trim();
+function requireLinearApiKey(args = {}, settings = {}) {
+  const key = String(args.apiKey || settings.apiKey || process.env.LINEAR_API_KEY || process.env.LINEAR_ACCESS_TOKEN || "").trim();
   if (!key) throw new Error("apiKey is required (or set LINEAR_API_KEY / LINEAR_ACCESS_TOKEN)");
   return key;
 }
 
-function linearIssueInput(issue, teamId, states) {
+async function resolveLinearTeamId(client, preferredTeamId) {
+  const teamId = String(preferredTeamId || "").trim();
+  if (teamId) return teamId;
+  const teams = await client.teams();
+  const first = teams[0];
+  if (!first?.id) {
+    throw new Error("teamId is required because no Linear teams were available to the API key");
+  }
+  return first.id;
+}
+
+function linearIssueInput(issue, teamId, states, columns = []) {
   const input = {
     teamId,
     title: String(issue.title || "Untitled issue"),
     description: linearDescription(issue),
     priority: linearPriority(issue.priority),
   };
-  const stateId = linearStateId(issue.status, states);
+  const stateId = linearStateId(issue.status, states, columns);
   if (stateId) input.stateId = stateId;
   if (issue.dueDate) input.dueDate = issue.dueDate;
   return input;
@@ -524,7 +579,12 @@ function linearPriority(priority) {
   return ({ urgent: 1, high: 2, medium: 3, low: 4, none: 0 })[String(priority || "none").toLowerCase()] ?? 0;
 }
 
-function linearStateId(status, states) {
+function linearStateId(status, states, columns = []) {
+  const column = columns.find((item) => item.id === status);
+  if (column?.linearStateId && states.some((state) => state.id === column.linearStateId)) return column.linearStateId;
+  const issueStateId = String(status || "").replace(/^linear_/, "").replace(/_/g, "-");
+  const byId = states.find((state) => normalizeLinearName(state.id).replace(/\s/g, "") === normalizeLinearName(issueStateId).replace(/\s/g, ""));
+  if (byId?.id) return byId.id;
   const aliases = {
     backlog: ["backlog", "triage"],
     todo: ["todo", "to do", "planned", "unstarted"],
@@ -537,8 +597,52 @@ function linearStateId(status, states) {
   return found?.id || "";
 }
 
+function linearColumnsFromStates(states) {
+  return states
+    .slice()
+    .sort((a, b) => (Number(a.position) || 0) - (Number(b.position) || 0) || String(a.name).localeCompare(String(b.name)))
+    .map((state) => ({
+      id: linearStatusId(state),
+      title: state.name || "Untitled",
+      linearStateId: state.id,
+      linearType: state.type || "",
+    }));
+}
+
+function linearStatusId(state) {
+  const stateId = String(state?.id || "").trim();
+  if (stateId) return `linear_${stateId.replace(/[^A-Za-z0-9]+/g, "_").toLowerCase()}`;
+  return normalizeLinearName(state?.name).replace(/\s/g, "_") || "backlog";
+}
+
+function linearIssueFromApi(issue) {
+  return {
+    id: issue.id,
+    identifier: issue.identifier,
+    url: issue.url,
+    title: issue.title,
+    description: issue.description,
+    priority: issue.priority,
+    dueDate: issue.dueDate,
+    createdAt: issue.createdAt,
+    updatedAt: issue.updatedAt,
+    state: issue.state,
+    assignee: issue.assignee?.displayName || issue.assignee?.name || issue.assignee?.email || "",
+    labels: Array.isArray(issue.labels?.nodes) ? issue.labels.nodes.map((label) => label.name).filter(Boolean) : [],
+  };
+}
+
 function normalizeLinearName(value) {
   return String(value || "").toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function issueAssignedToViewer(issue, viewer) {
+  const assignee = normalizeLinearName(issue.assignee);
+  if (!assignee) return false;
+  const candidates = [viewer?.name, viewer?.displayName, viewer?.email]
+    .map(normalizeLinearName)
+    .filter(Boolean);
+  return candidates.some((candidate) => assignee === candidate || assignee.includes(candidate) || candidate.includes(assignee));
 }
 
 function createLinearClient(apiKey, apiUrl = "https://api.linear.app/graphql") {
@@ -562,7 +666,7 @@ function createLinearClient(apiKey, apiUrl = "https://api.linear.app/graphql") {
     } catch {
       throw new Error(`Linear returned non-JSON response (${response.status})`);
     }
-    if (!response.ok) throw new Error(`Linear HTTP ${response.status}: ${payload.errors?.[0]?.message || text}`);
+    if (!response.ok) throw new Error(linearHttpErrorMessage(response.status, payload.errors?.[0]?.message || text));
     if (Array.isArray(payload.errors) && payload.errors.length) {
       throw new Error(payload.errors.map((error) => error.message).join("; "));
     }
@@ -570,17 +674,65 @@ function createLinearClient(apiKey, apiUrl = "https://api.linear.app/graphql") {
   }
 
   return {
+    async viewer() {
+      const data = await request(`
+        query ProjectHomeViewer {
+          viewer { id name displayName email }
+        }
+      `);
+      return data.viewer || {};
+    },
+    async teams() {
+      const data = await request(`
+        query ProjectHomeTeams {
+          teams {
+            nodes { id name key }
+          }
+        }
+      `);
+      return data.teams?.nodes || [];
+    },
     async teamStates(teamId) {
       const data = await request(`
         query ProjectHomeTeamStates($teamId: String!) {
           team(id: $teamId) {
             states {
-              nodes { id name type }
+              nodes { id name type position }
             }
           }
         }
       `, { teamId });
       return data.team?.states?.nodes || [];
+    },
+    async issues(teamId) {
+      let after = null;
+      const issues = [];
+      do {
+        const data = await request(`
+          query ProjectHomeTeamIssues($teamId: ID!, $after: String) {
+            issues(first: 100, after: $after, filter: { team: { id: { eq: $teamId } } }) {
+              nodes {
+                id
+                identifier
+                url
+                title
+                description
+                priority
+                dueDate
+                createdAt
+                updatedAt
+                state { id name type position }
+                assignee { name displayName email }
+                labels { nodes { name } }
+              }
+              pageInfo { hasNextPage endCursor }
+            }
+          }
+        `, { teamId, after });
+        issues.push(...(data.issues?.nodes || []));
+        after = data.issues?.pageInfo?.hasNextPage ? data.issues.pageInfo.endCursor : null;
+      } while (after);
+      return issues;
     },
     async createIssue(input) {
       const data = await request(`
@@ -612,14 +764,45 @@ function createLinearClient(apiKey, apiUrl = "https://api.linear.app/graphql") {
   };
 }
 
+function linearHttpErrorMessage(status, detail) {
+  if (status === 401) {
+    return "Linear rejected the saved API key. Re-enter the personal API key in Settings > Project Home, then try again.";
+  }
+  return `Linear HTTP ${status}: ${detail}`;
+}
+
 function createMockLinearClient() {
   return {
+    async viewer() {
+      return { id: "user-test", name: "Test User", displayName: "Test User", email: "test@example.com" };
+    },
+    async teams() {
+      return [{ id: "team-test", name: "Test Team", key: "LIN" }];
+    },
     async teamStates() {
       return [
-        { id: "state-todo", name: "Todo", type: "unstarted" },
-        { id: "state-progress", name: "In Progress", type: "started" },
-        { id: "state-done", name: "Done", type: "completed" },
+        { id: "state-todo", name: "Todo", type: "unstarted", position: 1 },
+        { id: "state-progress", name: "In Progress", type: "started", position: 2 },
+        { id: "state-done", name: "Done", type: "completed", position: 3 },
+        { id: "state-canceled", name: "Canceled", type: "canceled", position: 4 },
+        { id: "state-duplicate", name: "Duplicate", type: "canceled", position: 5 },
       ];
+    },
+    async issues() {
+      return [{
+        id: "lin-existing-1",
+        identifier: "LIN-99",
+        url: "https://linear.app/acme/issue/LIN-99/existing",
+        title: "Existing Linear issue",
+        description: "Already in Linear",
+        priority: 2,
+        dueDate: "",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        state: { id: "state-canceled", name: "Canceled", type: "canceled", position: 4 },
+        assignee: { name: "Test User", displayName: "Test User", email: "test@example.com" },
+        labels: { nodes: [{ name: "linear" }] },
+      }];
     },
     async createIssue(input) {
       return {

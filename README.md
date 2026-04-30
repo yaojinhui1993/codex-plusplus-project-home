@@ -15,6 +15,7 @@ The tweak also includes `mcp-server.js`, a stdio MCP server backed by the same i
 - `project_home_help` — self-documenting; pass `tool: "<name>"` for focused help
 - `project_home_columns`
 - `project_home_list_issues`
+- `project_home_search_issues`
 - `project_home_get_issue`
 - `project_home_create_issue`
 - `project_home_update_issue`
@@ -41,7 +42,7 @@ args = ["/ABSOLUTE/PATH/TO/codex-plusplus/tweaks/co.bennett.project-home/mcp-ser
 
 On macOS the absolute path is typically `/Users/<you>/Library/Application Support/codex-plusplus/tweaks/co.bennett.project-home/mcp-server.js`.
 
-To verify, ask Codex "what MCPs can you see?" — `project-home` should appear with the ten `project_home_*` tools. Once upstream Codex++ auto-registers MCP entries from tweak manifests, this manual step can go away.
+To verify, ask Codex "what MCPs can you see?" — `project-home` should appear with the `project_home_*` tools. Once upstream Codex++ auto-registers MCP entries from tweak manifests, this manual step can go away.
 
 ## Linear sync
 
@@ -49,12 +50,14 @@ To verify, ask Codex "what MCPs can you see?" — `project-home` should appear w
 
 ```bash
 export LINEAR_API_KEY="lin_api_..."
-export LINEAR_TEAM_ID="<team uuid>"
+export LINEAR_TEAM_ID="<team uuid>" # optional; first accessible team is used when omitted
 ```
 
 Then call the MCP tool with `projectPath`. Pass `issueId` to sync one issue or omit it to sync all issues in the project. Pass `dryRun: true` to preview creates/updates without writing to Linear or local issue metadata.
 
 After a successful write, the local issue stores `linear.id`, `linear.identifier`, `linear.url`, and `linear.syncedAt`. Later syncs update that Linear issue instead of creating a duplicate.
+
+You can also open Codex++ Settings > Project Home and save the Linear sync config per project. The settings page stores the required `apiKey` plus optional `teamId`, `apiUrl`, and default sync mode in the same per-project Project Home DB used by the MCP server. It includes a link to Linear API settings for creating a personal API key and choosing team access.
 
 > Note: Codex's Rust MCP transport speaks newline-delimited JSON (NDJSON) on stdio, not LSP-style `Content-Length` framing. `mcp-server.js` writes one JSON message per line accordingly.
 
