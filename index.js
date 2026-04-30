@@ -535,6 +535,8 @@ function startRenderer(self, api) {
     settingsSaveStatus: "idle",
     settingsSheetOpen: false,
     editor: null,
+    editorFocusRequest: 0,
+    editorFocusApplied: 0,
     view: null,
     host: null,
     preservedRouteNodes: [],
@@ -1877,6 +1879,7 @@ function renderProjectHomeView(state) {
     root.setAttribute(VIEW_ATTR, "root");
     root.setAttribute("role", "region");
     root.setAttribute("aria-label", "Project Home");
+    installProjectHomeEventBoundary(root);
     state.view = root;
   }
 
@@ -1911,6 +1914,7 @@ function renderProjectHomeView(state) {
   scroll.append(contentBlock);
   root.append(scroll);
   restoreProjectHomeEditorFocus(root, focusSnapshot);
+  applyPendingEditorFocus(state);
   scheduleProjectHomeMounts(state, project, token);
 }
 
@@ -1966,6 +1970,26 @@ function renderProjectHomeError(message) {
     "m-2 rounded-lg border border-token-border bg-token-input-background px-3 py-3 text-sm text-token-description-foreground";
   error.textContent = message;
   return error;
+}
+
+function installProjectHomeEventBoundary(root) {
+  const stop = (event) => {
+    event.stopPropagation();
+  };
+  for (const type of [
+    "pointerdown",
+    "mousedown",
+    "mouseup",
+    "click",
+    "dblclick",
+    "keydown",
+    "keypress",
+    "keyup",
+    "beforeinput",
+    "input",
+  ]) {
+    root.addEventListener(type, stop);
+  }
 }
 
 function renderSearchEmpty(state) {
@@ -3001,25 +3025,32 @@ function renderIssueEditor(state) {
   panel.append(form);
   backdrop.append(panel);
 
-  focusIssueTitleInput(titleInput, { select: !isEdit });
+  if (!isEdit) titleInput.setAttribute("data-editor-autofocus", "");
 
   return backdrop;
 }
 
 function focusIssueTitleInput(input, options = {}) {
   if (!(input instanceof HTMLInputElement)) return;
-  let didSelect = false;
-  const focus = () => {
-    if (!input.isConnected) return;
-    if (document.activeElement === input) return;
-    input.focus({ preventScroll: true });
-    if (options.select && !didSelect) {
-      input.select();
-      didSelect = true;
-    }
-  };
-  focus();
-  window.requestAnimationFrame(focus);
+  if (!input.isConnected || document.activeElement === input) return;
+  input.focus({ preventScroll: true });
+  if (options.select) input.select();
+}
+
+function applyPendingEditorFocus(state) {
+  if (!state.editor || state.editorFocusApplied === state.editorFocusRequest) return;
+  const root = state.view;
+  if (!(root instanceof HTMLElement) || !root.isConnected) return;
+  const editor = root.querySelector(`[${VIEW_ATTR}="editor-panel"]`);
+  if (!(editor instanceof HTMLElement)) return;
+  if (document.activeElement instanceof HTMLElement && editor.contains(document.activeElement)) {
+    state.editorFocusApplied = state.editorFocusRequest;
+    return;
+  }
+  const input = editor.querySelector("[data-editor-autofocus]");
+  if (!(input instanceof HTMLInputElement)) return;
+  focusIssueTitleInput(input, { select: true });
+  state.editorFocusApplied = state.editorFocusRequest;
 }
 
 function createStatusChip(state, value) {
@@ -4367,12 +4398,14 @@ function toggleSectionCollapsed(state, columnId) {
 
 function openIssueEditor(state, editor) {
   state.editor = editor;
+  state.editorFocusRequest += 1;
   closeProjectHomeContextMenu(state);
   renderProjectHomeView(state);
 }
 
 function closeIssueEditor(state) {
   state.editor = null;
+  state.editorFocusApplied = state.editorFocusRequest;
   renderProjectHomeView(state);
 }
 
@@ -4618,6 +4651,7 @@ function mountProjectHomeRoot(state, host, root) {
   host.setAttribute(VIEW_ATTR, "host");
   state.host = host;
   syncHeaderForProjectHome(state);
+  applyPendingEditorFocus(state);
 }
 
 function restoreProjectHomeHost(state, root = state.view) {
