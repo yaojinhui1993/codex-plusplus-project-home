@@ -3407,17 +3407,19 @@ async function loadProjectHomeBoard(state, project, options = {}) {
   if (state.boardLoading && !options.force) return;
   state.boardLoading = true;
   state.boardError = "";
+  let shouldRender = true;
   try {
     const board = await state.api.ipc.invoke(IPC_BOARD_LIST, { projectPath: project.path });
     if (state.disposed || !sameProject(state.current, project)) return;
     state.board = normalizeBoard(board);
+    shouldRender = !state.editor;
   } catch (error) {
     if (state.disposed || !sameProject(state.current, project)) return;
     state.boardError = `Could not load issues: ${error?.message || String(error)}`;
   } finally {
     if (!state.disposed && sameProject(state.current, project)) {
       state.boardLoading = false;
-      renderProjectHomeView(state);
+      if (shouldRender) renderProjectHomeView(state);
     }
   }
 }
