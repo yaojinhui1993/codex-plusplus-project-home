@@ -67,6 +67,32 @@ test("buildWorkSessionLaunchPayload bridges the current session into Focus Compo
   assert.match(payload.requestedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test("buildShipNoteLaunchPayload marks an end-session launch for Focus Composer", () => {
+  const helpers = projectHome.__test || {};
+  assert.equal(typeof helpers.buildShipNoteLaunchPayload, "function");
+
+  const payload = helpers.buildShipNoteLaunchPayload({
+    current: {
+      label: "sniper-system",
+      path: "/Users/yjh/Playground/sniper-system",
+    },
+    board: {
+      settings: { activeIssueId: "SNI-1" },
+      issues: [
+        { id: "SNI-1", title: "Fix regression colors", status: "in_progress", priority: "high", rank: 0 },
+        { id: "SNI-7", title: "Review Codex tweak crash recovery", status: "in_review", priority: "high", rank: 1 },
+      ],
+    },
+  });
+
+  assert.equal(payload.kind, "ship-note");
+  assert.equal(payload.source, "project-home");
+  assert.equal(payload.project.projectLabel, "sniper-system");
+  assert.equal(payload.activeIssue.issueId, "SNI-1");
+  assert.deepEqual(payload.project.focusIssues.map((issue) => issue.id), ["SNI-1", "SNI-7"]);
+  assert.match(payload.requestedAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
 test("header icon controls opt out of Electron drag regions", () => {
   const helpers = projectHome.__test || {};
   assert.equal(typeof helpers.headerControlInteractionStyle, "function");

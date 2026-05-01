@@ -3711,26 +3711,42 @@ function syncSharedResumePack(state) {
 }
 
 function startWorkSession(state) {
+  startFocusComposerLaunch(state, buildWorkSessionLaunchPayload, "work session");
+}
+
+function startShipNoteSession(state) {
+  startFocusComposerLaunch(state, buildShipNoteLaunchPayload, "ship note");
+}
+
+function startFocusComposerLaunch(state, buildPayload, label) {
   syncSharedActiveIssue(state);
   syncSharedResumePack(state);
-  const payload = buildWorkSessionLaunchPayload(state);
+  const payload = buildPayload(state);
   try {
     window.dispatchEvent(new CustomEvent(FOCUS_COMPOSER_LAUNCH_EVENT, { detail: payload }));
-    state.api.log.info("[project-home] work session launch requested", {
+    state.api.log.info(`[project-home] ${label} launch requested`, {
       projectPath: payload?.project?.projectPath || "",
       activeIssueId: payload?.activeIssue?.issueId || "",
     });
   } catch (error) {
-    state.api.log.warn("[project-home] work session launch failed", { error: error?.message || String(error) });
+    state.api.log.warn(`[project-home] ${label} launch failed`, { error: error?.message || String(error) });
   }
 }
 
 function buildWorkSessionLaunchPayload(state) {
+  return buildFocusComposerLaunchPayload(state, "work-session");
+}
+
+function buildShipNoteLaunchPayload(state) {
+  return buildFocusComposerLaunchPayload(state, "ship-note");
+}
+
+function buildFocusComposerLaunchPayload(state, kind) {
   const project = buildResumeSnapshot(state);
   return {
     version: 1,
     source: "project-home",
-    kind: "work-session",
+    kind,
     project,
     activeIssue: activeIssueBridgePayload(state),
     requestedAt: new Date().toISOString(),
@@ -5168,6 +5184,7 @@ function renderProjectHomeHeader(state, node) {
   controls.style.webkitAppRegion = "no-drag";
   controls.append(
     renderStartWorkButton(state),
+    renderEndSessionButton(state),
     renderIssueSearch(state),
     renderViewModeToggle(state),
     renderColumnMenuButton(state),
@@ -5181,6 +5198,12 @@ function renderProjectHomeHeader(state, node) {
 function renderStartWorkButton(state) {
   return headerIconButton("Start work session", playIconSvg(), () => {
     startWorkSession(state);
+  });
+}
+
+function renderEndSessionButton(state) {
+  return headerIconButton("End session / ship note", circleCheckIconSvg(), () => {
+    startShipNoteSession(state);
   });
 }
 
@@ -6176,6 +6199,10 @@ function playIconSvg() {
   return iconSvg('<polygon points="6 3 20 12 6 21 6 3"></polygon>');
 }
 
+function circleCheckIconSvg() {
+  return iconSvg('<circle cx="12" cy="12" r="9"></circle><path d="m9 12 2 2 4-4"></path>');
+}
+
 function settingsIconSvg() {
   return iconSvg(
     '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.52a2 2 0 0 1-1 1.72l-.15.1a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.52a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>' +
@@ -6215,6 +6242,7 @@ function iconSvg(paths) {
 module.exports.__test = {
   buildResumeSnapshot,
   buildWorkSessionLaunchPayload,
+  buildShipNoteLaunchPayload,
   headerControlInteractionStyle,
   isNativeSidebarToggleLabel,
 };
