@@ -22,6 +22,7 @@ const CONTEXT_MENU_ATTR = "data-codexpp-project-home-menu";
 const ISSUE_CARD_ATTR = "data-codexpp-project-home-issue-card";
 const COLUMN_ATTR = "data-codexpp-project-home-column";
 const HEADER_ATTR = "data-codexpp-project-home-header";
+const QUICK_CAPTURE_ATTR = "data-codexpp-project-home-quick-capture";
 const VIEW_MODE_STORAGE_KEY = "project-home:view-mode";
 const VISIBLE_COLUMNS_STORAGE_KEY = "project-home:visible-columns";
 const COLLAPSED_SECTIONS_STORAGE_KEY = "project-home:collapsed-sections";
@@ -122,6 +123,7 @@ module.exports = {
     if (state.keyboardShortcutsRefresh) window.removeEventListener(SHORTCUTS_REFRESH_EVENT, state.keyboardShortcutsRefresh);
     unregisterProjectHomeQuickActions();
     unregisterProjectHomeKeyboardShortcuts();
+    closeQuickCaptureDialog(state);
     state.restoreHistory?.();
     state.pageHandle?.unregister?.();
     if (state.settingsSaveResetTimer) window.clearTimeout(state.settingsSaveResetTimer);
@@ -568,6 +570,7 @@ function startRenderer(self, api) {
     settingsSaveResetTimer: null,
     settingsSaveStatus: "idle",
     settingsSheetOpen: false,
+    quickCapture: null,
     editor: null,
     view: null,
     host: null,
@@ -1726,6 +1729,158 @@ function installStyle() {
       background: rgba(239,68,68,.08);
       color: #ef4444;
       font-size: 12px;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="overlay"] {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483646;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 16vh 24px 24px;
+      background: rgba(0, 0, 0, .30);
+      backdrop-filter: blur(2px);
+      -webkit-backdrop-filter: blur(2px);
+    }
+
+    [${QUICK_CAPTURE_ATTR}="panel"] {
+      width: min(560px, 100%);
+      border: 1px solid var(--color-token-border, rgba(0,0,0,.18));
+      border-radius: 12px;
+      background: var(--color-token-main-surface-primary, Canvas);
+      color: var(--color-token-text-primary, currentColor);
+      box-shadow: 0 24px 64px rgba(0, 0, 0, .28), 0 2px 8px rgba(0, 0, 0, .12);
+      overflow: hidden;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="head"],
+    [${QUICK_CAPTURE_ATTR}="foot"] {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--color-token-border-light, rgba(127,127,127,.16));
+    }
+
+    [${QUICK_CAPTURE_ATTR}="foot"] {
+      border-top: 1px solid var(--color-token-border-light, rgba(127,127,127,.16));
+      border-bottom: 0;
+      background: var(--color-token-main-surface-secondary, transparent);
+    }
+
+    [${QUICK_CAPTURE_ATTR}="title"] {
+      margin: 0;
+      font-size: 14px;
+      line-height: 20px;
+      font-weight: 650;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="project"],
+    [${QUICK_CAPTURE_ATTR}="status"] {
+      font-size: 12px;
+      line-height: 16px;
+      color: var(--color-token-description-foreground, currentColor);
+      overflow-wrap: anywhere;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="body"] {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 14px;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="input"],
+    [${QUICK_CAPTURE_ATTR}="textarea"],
+    [${QUICK_CAPTURE_ATTR}="select"] {
+      width: 100%;
+      border: 1px solid var(--color-token-border-light, rgba(127,127,127,.22));
+      border-radius: 8px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      outline: none;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="input"] {
+      height: 38px;
+      padding: 0 10px;
+      font-size: 14px;
+      font-weight: 540;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="textarea"] {
+      min-height: 82px;
+      resize: vertical;
+      padding: 9px 10px;
+      font-size: 13px;
+      line-height: 18px;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="select"] {
+      height: 32px;
+      padding: 0 8px;
+      font-size: 12px;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="input"]:focus,
+    [${QUICK_CAPTURE_ATTR}="textarea"]:focus,
+    [${QUICK_CAPTURE_ATTR}="select"]:focus {
+      border-color: var(--color-token-border, rgba(0,0,0,.36));
+      box-shadow: 0 0 0 2px rgba(59,130,246,.14);
+    }
+
+    [${QUICK_CAPTURE_ATTR}="row"] {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 140px;
+      gap: 10px;
+      align-items: end;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="field"] {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="field"] label {
+      font-size: 11px;
+      line-height: 14px;
+      color: var(--color-token-description-foreground, currentColor);
+    }
+
+    [${QUICK_CAPTURE_ATTR}="actions"] {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="button"] {
+      height: 30px;
+      border: 0;
+      border-radius: 7px;
+      padding: 0 11px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="button"][data-variant="secondary"] {
+      background: transparent;
+      color: var(--color-token-foreground, currentColor);
+    }
+
+    [${QUICK_CAPTURE_ATTR}="button"][data-variant="primary"] {
+      background: var(--color-token-text-primary, #111827);
+      color: var(--color-token-main-surface-primary, #fff);
+      font-weight: 600;
+    }
+
+    [${QUICK_CAPTURE_ATTR}="button"]:disabled {
+      cursor: default;
+      opacity: .55;
     }
 
     [${VIEW_ATTR}="editor-panel"] [data-editor-comments] {
@@ -3786,6 +3941,17 @@ function buildProjectHomeQuickActions(state = {}) {
   return [
     {
       source: QUICK_ACTIONS_SOURCE,
+      id: "quick-capture",
+      title: "Quick Capture to Project Home",
+      subtitle: "Capture a Backlog issue for the current project.",
+      keywords: ["project home", "capture", "issue", "backlog", "quick"],
+      shortcut: "Capture",
+      disabledReason: "No Project Home project",
+      isDisabled: (context) => !hasProjectHomeQuickCaptureContext(state, context),
+      run: (context) => runProjectHomeQuickAction(state, "quick-capture", context),
+    },
+    {
+      source: QUICK_ACTIONS_SOURCE,
       id: "start-work-session",
       title: "Start Work Session",
       subtitle: "Create a review-first launch prompt from Project Home context.",
@@ -3899,7 +4065,81 @@ function hasProjectHomeQuickActionContext(context = {}) {
   );
 }
 
+function hasProjectHomeQuickCaptureContext(state = {}, context = {}) {
+  return Boolean(projectHomeQuickCaptureTarget(state, context).projectPath);
+}
+
+function projectHomeQuickCaptureTarget(state = {}, context = {}) {
+  const project = context?.project && typeof context.project === "object" ? context.project : {};
+  const current = state?.current && typeof state.current === "object" ? state.current : {};
+  const projectPath = cleanCaptureText(
+    current.path ||
+    current.projectPath ||
+    project.projectPath ||
+    project.path ||
+    context.projectPath ||
+    "",
+  );
+  const projectLabel = cleanCaptureText(
+    current.label ||
+    current.projectLabel ||
+    project.projectLabel ||
+    project.label ||
+    context.projectLabel ||
+    "",
+  );
+  return { projectPath, projectLabel };
+}
+
+function buildQuickCaptureIssueInput(input = {}) {
+  return {
+    title: cleanCaptureText(input.title) || "Untitled capture",
+    description: cleanCaptureText(input.description),
+    status: "backlog",
+    priority: normalizeCapturePriority(input.priority),
+    labels: normalizeCaptureLabels(input.labels),
+  };
+}
+
+function initialQuickCaptureTitle(context = {}) {
+  return cleanCaptureText(
+    context.title ||
+    context.query ||
+    context.selectedText ||
+    context.selection ||
+    "",
+  ).slice(0, 160);
+}
+
+function initialQuickCaptureDescription(context = {}) {
+  const value = context.description || context.note || context.url || "";
+  return cleanCaptureText(value);
+}
+
+function normalizeCapturePriority(value) {
+  const priority = String(value || "none").trim().toLowerCase();
+  return ISSUE_PRIORITIES.includes(priority) ? priority : "none";
+}
+
+function normalizeCaptureLabels(value) {
+  const raw = Array.isArray(value) ? value : String(value || "capture").split(",");
+  const labels = [];
+  for (const item of raw) {
+    const label = cleanCaptureText(item).toLowerCase();
+    if (label && !labels.includes(label)) labels.push(label);
+  }
+  return labels.length ? labels : ["capture"];
+}
+
+function cleanCaptureText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
 function runProjectHomeQuickAction(state, kind, context = {}) {
+  if (kind === "quick-capture") {
+    openQuickCaptureDialog(state, context);
+    return;
+  }
   if (state?.current && state?.board) {
     if (kind === "ship-note") startShipNoteSession(state);
     else startWorkSession(state);
@@ -4917,6 +5157,187 @@ function isIssueSelected(state, issueId) {
   return state.selectedIssueIds instanceof Set && state.selectedIssueIds.has(issueId);
 }
 
+function openQuickCaptureDialog(state, context = {}) {
+  if (typeof document === "undefined") return;
+  const target = projectHomeQuickCaptureTarget(state, context);
+  if (!target.projectPath) {
+    if (state?.view) {
+      state.boardError = "Open Project Home for a project before quick capture.";
+      renderProjectHomeView(state);
+    }
+    return;
+  }
+  closeQuickCaptureDialog(state);
+
+  const overlay = document.createElement("div");
+  overlay.setAttribute(QUICK_CAPTURE_ATTR, "overlay");
+  overlay.addEventListener("pointerdown", (event) => {
+    if (event.target === overlay) closeQuickCaptureDialog(state);
+  });
+
+  const panel = document.createElement("form");
+  panel.setAttribute(QUICK_CAPTURE_ATTR, "panel");
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  panel.setAttribute("aria-label", "Quick capture to Project Home");
+
+  const head = document.createElement("div");
+  head.setAttribute(QUICK_CAPTURE_ATTR, "head");
+  const heading = document.createElement("div");
+  const title = document.createElement("h2");
+  title.setAttribute(QUICK_CAPTURE_ATTR, "title");
+  title.textContent = "Quick Capture";
+  const project = document.createElement("div");
+  project.setAttribute(QUICK_CAPTURE_ATTR, "project");
+  project.textContent = `Backlog · ${target.projectLabel || basenameFor(target.projectPath, "Project")}`;
+  heading.append(title, project);
+  const close = quickCaptureButton("Cancel", "secondary");
+  close.setAttribute("aria-label", "Close quick capture");
+  close.innerHTML = xIconSvg();
+  close.addEventListener("click", (event) => {
+    event.preventDefault();
+    closeQuickCaptureDialog(state);
+  });
+  head.append(heading, close);
+
+  const body = document.createElement("div");
+  body.setAttribute(QUICK_CAPTURE_ATTR, "body");
+  const titleField = quickCaptureField("Title");
+  const titleInput = document.createElement("input");
+  titleInput.setAttribute(QUICK_CAPTURE_ATTR, "input");
+  titleInput.name = "title";
+  titleInput.placeholder = "What should Project Home remember?";
+  titleInput.autocomplete = "off";
+  titleInput.value = initialQuickCaptureTitle(context);
+  titleField.append(titleInput);
+
+  const descriptionField = quickCaptureField("Notes");
+  const descriptionInput = document.createElement("textarea");
+  descriptionInput.setAttribute(QUICK_CAPTURE_ATTR, "textarea");
+  descriptionInput.name = "description";
+  descriptionInput.placeholder = "Optional context, acceptance criteria, or next step.";
+  descriptionInput.value = initialQuickCaptureDescription(context);
+  descriptionField.append(descriptionInput);
+
+  const row = document.createElement("div");
+  row.setAttribute(QUICK_CAPTURE_ATTR, "row");
+  const hint = document.createElement("div");
+  hint.setAttribute(QUICK_CAPTURE_ATTR, "project");
+  hint.textContent = "Creates a Backlog issue tagged capture.";
+  const priorityField = quickCaptureField("Priority");
+  const priorityInput = document.createElement("select");
+  priorityInput.setAttribute(QUICK_CAPTURE_ATTR, "select");
+  priorityInput.name = "priority";
+  for (const priority of ISSUE_PRIORITIES) {
+    const option = document.createElement("option");
+    option.value = priority;
+    option.textContent = priorityLabel(priority);
+    priorityInput.append(option);
+  }
+  priorityInput.value = "none";
+  priorityField.append(priorityInput);
+  row.append(hint, priorityField);
+  body.append(titleField, descriptionField, row);
+
+  const foot = document.createElement("div");
+  foot.setAttribute(QUICK_CAPTURE_ATTR, "foot");
+  const status = document.createElement("div");
+  status.setAttribute(QUICK_CAPTURE_ATTR, "status");
+  status.textContent = "Cmd+Enter to capture";
+  const actions = document.createElement("div");
+  actions.setAttribute(QUICK_CAPTURE_ATTR, "actions");
+  const cancel = quickCaptureButton("Cancel", "secondary");
+  const submit = quickCaptureButton("Capture", "primary");
+  submit.type = "submit";
+  cancel.addEventListener("click", (event) => {
+    event.preventDefault();
+    closeQuickCaptureDialog(state);
+  });
+  actions.append(cancel, submit);
+  foot.append(status, actions);
+
+  panel.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    cancel.disabled = true;
+    status.textContent = "Capturing...";
+    try {
+      const input = buildQuickCaptureIssueInput({
+        title: titleInput.value,
+        description: descriptionInput.value,
+        priority: priorityInput.value,
+      });
+      const result = await state.api.ipc.invoke(IPC_ISSUE_CREATE, {
+        ...input,
+        projectPath: target.projectPath,
+      });
+      applyQuickCaptureResult(state, target, result);
+      status.textContent = `Captured ${result?.issue?.id || "issue"}.`;
+      window.setTimeout(() => closeQuickCaptureDialog(state), 450);
+    } catch (error) {
+      submit.disabled = false;
+      cancel.disabled = false;
+      status.textContent = error?.message || String(error);
+    }
+  });
+  panel.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeQuickCaptureDialog(state);
+      return;
+    }
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      panel.requestSubmit?.() || submit.click();
+    }
+  });
+
+  panel.append(head, body, foot);
+  overlay.append(panel);
+  document.body.append(overlay);
+  state.quickCapture = { overlay, target };
+  focusIssueTitleInput(titleInput, { select: Boolean(titleInput.value) });
+}
+
+function closeQuickCaptureDialog(state) {
+  state?.quickCapture?.overlay?.remove?.();
+  if (state) state.quickCapture = null;
+}
+
+function quickCaptureField(labelText) {
+  const field = document.createElement("div");
+  field.setAttribute(QUICK_CAPTURE_ATTR, "field");
+  const label = document.createElement("label");
+  label.textContent = labelText;
+  field.append(label);
+  return field;
+}
+
+function quickCaptureButton(label, variant) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.setAttribute(QUICK_CAPTURE_ATTR, "button");
+  button.dataset.variant = variant;
+  button.textContent = label;
+  return button;
+}
+
+function applyQuickCaptureResult(state, target, result) {
+  const board = result?.board || result;
+  if (!board || state.current?.path !== target.projectPath) return;
+  state.board = normalizeBoard(board);
+  syncSharedActiveIssue(state);
+  syncSharedResumePack(state);
+  state.headerSignature = "";
+  state.boardError = "";
+  renderProjectHomeView(state);
+  syncHeaderForProjectHome(state);
+  const issueId = result?.issue?.id || "";
+  if (issueId && linearSyncReady(state.board)) {
+    syncIssueToLinearInBackground(state, target.projectPath, issueId);
+  }
+}
+
 function selectedIssues(state) {
   const ids = state.selectedIssueIds instanceof Set ? state.selectedIssueIds : new Set();
   return orderedIssues(state).filter((issue) => ids.has(issue.id));
@@ -5375,6 +5796,7 @@ function renderProjectHomeHeader(state, node) {
   controls.className = "flex shrink-0 items-center gap-2";
   controls.style.webkitAppRegion = "no-drag";
   controls.append(
+    renderQuickCaptureButton(state),
     renderStartWorkButton(state),
     renderEndSessionButton(state),
     renderIssueSearch(state),
@@ -5385,6 +5807,12 @@ function renderProjectHomeHeader(state, node) {
   );
 
   node.append(identity, controls);
+}
+
+function renderQuickCaptureButton(state) {
+  return headerIconButton("Quick capture issue", plusSquareIconSvg(), () => {
+    openQuickCaptureDialog(state);
+  });
 }
 
 function renderStartWorkButton(state) {
@@ -6395,6 +6823,10 @@ function circleCheckIconSvg() {
   return iconSvg('<circle cx="12" cy="12" r="9"></circle><path d="m9 12 2 2 4-4"></path>');
 }
 
+function plusSquareIconSvg() {
+  return iconSvg('<rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M12 8v8"></path><path d="M8 12h8"></path>');
+}
+
 function settingsIconSvg() {
   return iconSvg(
     '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.52a2 2 0 0 1-1 1.72l-.15.1a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.52a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>' +
@@ -6436,6 +6868,7 @@ module.exports.__test = {
   buildWorkSessionLaunchPayload,
   buildShipNoteLaunchPayload,
   buildProjectHomeQuickActions,
+  buildQuickCaptureIssueInput,
   buildProjectHomeKeyboardShortcuts,
   headerControlInteractionStyle,
   isNativeSidebarToggleLabel,

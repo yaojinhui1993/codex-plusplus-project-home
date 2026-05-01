@@ -11,6 +11,7 @@ V1 includes a per-project kanban board for Linear-style issues:
 
 - Columns: Backlog, Todo, In Progress, In Review, Done
 - Create issues from the board or a column header
+- Quick Capture from the Project Home header or Global Quick Actions creates a Backlog issue tagged `capture`
 - Drag issues between columns
 - Right-click or use the issue ellipsis menu to edit, move, or delete
 - Right-click an issue and choose `Set active issue` to bridge it into Focus Composer

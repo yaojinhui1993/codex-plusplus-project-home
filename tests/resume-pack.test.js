@@ -98,16 +98,47 @@ test("buildProjectHomeQuickActions registers start and ship-note actions", () =>
   assert.equal(typeof helpers.buildProjectHomeQuickActions, "function");
 
   const actions = helpers.buildProjectHomeQuickActions({});
-  assert.deepEqual(actions.map((action) => action.id), ["start-work-session", "end-session-ship-note"]);
+  assert.deepEqual(actions.map((action) => action.id), ["quick-capture", "start-work-session", "end-session-ship-note"]);
   assert.equal(actions[0].source, "project-home");
-  assert.equal(actions[0].title, "Start Work Session");
-  assert.equal(actions[1].title, "End Session / Ship Note");
+  assert.equal(actions[0].title, "Quick Capture to Project Home");
+  assert.equal(actions[1].title, "Start Work Session");
+  assert.equal(actions[2].title, "End Session / Ship Note");
   assert.equal(actions[0].isDisabled({}), true);
+  assert.equal(actions[0].isDisabled({ project: { projectLabel: "sniper-system" } }), true);
+  assert.equal(actions[0].isDisabled({ project: { projectPath: "/Users/yjh/Playground/sniper-system" } }), false);
   assert.equal(actions[1].isDisabled({}), true);
-  assert.equal(actions[0].isDisabled({ project: { projectLabel: "sniper-system" } }), false);
-  assert.equal(actions[1].isDisabled({ activeIssue: { issueId: "SNI-1" } }), false);
+  assert.equal(actions[2].isDisabled({}), true);
+  assert.equal(actions[1].isDisabled({ project: { projectLabel: "sniper-system" } }), false);
+  assert.equal(actions[2].isDisabled({ activeIssue: { issueId: "SNI-1" } }), false);
   assert.equal(typeof actions[0].run, "function");
   assert.equal(typeof actions[1].run, "function");
+  assert.equal(typeof actions[2].run, "function");
+});
+
+test("buildQuickCaptureIssueInput normalizes lightweight capture values", () => {
+  const helpers = projectHome.__test || {};
+  assert.equal(typeof helpers.buildQuickCaptureIssueInput, "function");
+
+  assert.deepEqual(helpers.buildQuickCaptureIssueInput({
+    title: "  Fix visual boundary  ",
+    description: "  compare the card borders  ",
+    priority: "HIGH",
+    labels: "capture, ui, capture",
+  }), {
+    title: "Fix visual boundary",
+    description: "compare the card borders",
+    status: "backlog",
+    priority: "high",
+    labels: ["capture", "ui"],
+  });
+
+  assert.deepEqual(helpers.buildQuickCaptureIssueInput({ title: "" }), {
+    title: "Untitled capture",
+    description: "",
+    status: "backlog",
+    priority: "none",
+    labels: ["capture"],
+  });
 });
 
 test("buildProjectHomeKeyboardShortcuts registers global and read-only board shortcuts", () => {
