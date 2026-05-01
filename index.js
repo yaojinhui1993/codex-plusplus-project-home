@@ -31,6 +31,10 @@ const ACTIVE_ISSUE_CHANGED_EVENT = "codexpp-project-home-active-issue-changed";
 const RESUME_PACK_STORAGE_KEY = "codexpp.project-home.resumePack.v1";
 const RESUME_PACK_CHANGED_EVENT = "codexpp-project-home-resume-pack-changed";
 const FOCUS_COMPOSER_LAUNCH_EVENT = "codexpp-focus-composer-launch";
+const QUICK_ACTIONS_REGISTER_EVENT = "codexpp-global-quick-actions-register";
+const QUICK_ACTIONS_UNREGISTER_EVENT = "codexpp-global-quick-actions-unregister";
+const QUICK_ACTIONS_REFRESH_EVENT = "codexpp-global-quick-actions-request-refresh";
+const QUICK_ACTIONS_SOURCE = "project-home";
 
 const IPC_BOARD_LIST = "project-home:issues:list";
 const IPC_ISSUE_CREATE = "project-home:issue:create";
@@ -111,6 +115,8 @@ module.exports = {
     window.removeEventListener("popstate", state.onRouteChange);
     window.removeEventListener("hashchange", state.onRouteChange);
     window.removeEventListener(ROUTE_EVENT, state.onRouteChange);
+    if (state.quickActionsRefresh) window.removeEventListener(QUICK_ACTIONS_REFRESH_EVENT, state.quickActionsRefresh);
+    unregisterProjectHomeQuickActions();
     state.restoreHistory?.();
     state.pageHandle?.unregister?.();
     if (state.settingsSaveResetTimer) window.clearTimeout(state.settingsSaveResetTimer);
@@ -578,6 +584,7 @@ function startRenderer(self, api) {
     onKeyDown: null,
     onResize: null,
     onRouteChange: null,
+    quickActionsRefresh: null,
     restoreHistory: null,
   };
   self._state = state;
@@ -788,6 +795,7 @@ function startRenderer(self, api) {
   };
   state.onResize = () => syncProjectHomeHost(state);
   state.onRouteChange = () => handleRouteChange(state);
+  state.quickActionsRefresh = () => registerProjectHomeQuickActions(state);
   state.restoreHistory = patchHistoryNavigation();
 
   window.addEventListener("pointerdown", state.onSearchPointerDown, true);
@@ -800,6 +808,8 @@ function startRenderer(self, api) {
   window.addEventListener("popstate", state.onRouteChange);
   window.addEventListener("hashchange", state.onRouteChange);
   window.addEventListener(ROUTE_EVENT, state.onRouteChange);
+  window.addEventListener(QUICK_ACTIONS_REFRESH_EVENT, state.quickActionsRefresh);
+  registerProjectHomeQuickActions(state);
 
   state.observer = new MutationObserver(() => {
     scheduleApply(state);
@@ -3733,6 +3743,87 @@ function startFocusComposerLaunch(state, buildPayload, label) {
   }
 }
 
+function registerProjectHomeQuickActions(state) {
+  window.dispatchEvent(new CustomEvent(QUICK_ACTIONS_REGISTER_EVENT, {
+    detail: {
+      source: QUICK_ACTIONS_SOURCE,
+      actions: buildProjectHomeQuickActions(state),
+    },
+  }));
+}
+
+function unregisterProjectHomeQuickActions() {
+  window.dispatchEvent(new CustomEvent(QUICK_ACTIONS_UNREGISTER_EVENT, {
+    detail: { source: QUICK_ACTIONS_SOURCE },
+  }));
+}
+
+function buildProjectHomeQuickActions(state = {}) {
+  return [
+    {
+      source: QUICK_ACTIONS_SOURCE,
+      id: "start-work-session",
+      title: "Start Work Session",
+      subtitle: "Create a review-first launch prompt from Project Home context.",
+      keywords: ["project home", "start", "resume", "work"],
+      shortcut: "Start",
+      disabledReason: "No Project Home context",
+      isDisabled: (context) => !hasProjectHomeQuickActionContext(context),
+      run: (context) => runProjectHomeQuickAction(state, "work-session", context),
+    },
+    {
+      source: QUICK_ACTIONS_SOURCE,
+      id: "end-session-ship-note",
+      title: "End Session / Ship Note",
+      subtitle: "Create a concise ship note draft for this session.",
+      keywords: ["project home", "ship", "handoff", "end"],
+      shortcut: "Ship",
+      disabledReason: "No Project Home context",
+      isDisabled: (context) => !hasProjectHomeQuickActionContext(context),
+      run: (context) => runProjectHomeQuickAction(state, "ship-note", context),
+    },
+  ];
+}
+
+function hasProjectHomeQuickActionContext(context = {}) {
+  const project = context?.project && typeof context.project === "object" ? context.project : {};
+  const active = context?.activeIssue && typeof context.activeIssue === "object" ? context.activeIssue : {};
+  return Boolean(
+    project.projectPath ||
+    project.projectLabel ||
+    project.activeIssue?.issueId ||
+    project.activeIssue?.id ||
+    active.issueId ||
+    active.id,
+  );
+}
+
+function runProjectHomeQuickAction(state, kind, context = {}) {
+  if (state?.current && state?.board) {
+    if (kind === "ship-note") startShipNoteSession(state);
+    else startWorkSession(state);
+    return;
+  }
+  window.dispatchEvent(new CustomEvent(FOCUS_COMPOSER_LAUNCH_EVENT, {
+    detail: buildFocusComposerLaunchPayloadFromContext(kind, context),
+  }));
+}
+
+function buildFocusComposerLaunchPayloadFromContext(kind, context = {}) {
+  const project = context?.project && typeof context.project === "object" ? context.project : null;
+  const activeIssue = context?.activeIssue && typeof context.activeIssue === "object"
+    ? context.activeIssue
+    : project?.activeIssue || null;
+  return {
+    version: 1,
+    source: QUICK_ACTIONS_SOURCE,
+    kind,
+    project,
+    activeIssue,
+    requestedAt: new Date().toISOString(),
+  };
+}
+
 function buildWorkSessionLaunchPayload(state) {
   return buildFocusComposerLaunchPayload(state, "work-session");
 }
@@ -6243,6 +6334,7 @@ module.exports.__test = {
   buildResumeSnapshot,
   buildWorkSessionLaunchPayload,
   buildShipNoteLaunchPayload,
+  buildProjectHomeQuickActions,
   headerControlInteractionStyle,
   isNativeSidebarToggleLabel,
 };

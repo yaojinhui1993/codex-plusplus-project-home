@@ -93,6 +93,23 @@ test("buildShipNoteLaunchPayload marks an end-session launch for Focus Composer"
   assert.match(payload.requestedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test("buildProjectHomeQuickActions registers start and ship-note actions", () => {
+  const helpers = projectHome.__test || {};
+  assert.equal(typeof helpers.buildProjectHomeQuickActions, "function");
+
+  const actions = helpers.buildProjectHomeQuickActions({});
+  assert.deepEqual(actions.map((action) => action.id), ["start-work-session", "end-session-ship-note"]);
+  assert.equal(actions[0].source, "project-home");
+  assert.equal(actions[0].title, "Start Work Session");
+  assert.equal(actions[1].title, "End Session / Ship Note");
+  assert.equal(actions[0].isDisabled({}), true);
+  assert.equal(actions[1].isDisabled({}), true);
+  assert.equal(actions[0].isDisabled({ project: { projectLabel: "sniper-system" } }), false);
+  assert.equal(actions[1].isDisabled({ activeIssue: { issueId: "SNI-1" } }), false);
+  assert.equal(typeof actions[0].run, "function");
+  assert.equal(typeof actions[1].run, "function");
+});
+
 test("header icon controls opt out of Electron drag regions", () => {
   const helpers = projectHome.__test || {};
   assert.equal(typeof helpers.headerControlInteractionStyle, "function");
