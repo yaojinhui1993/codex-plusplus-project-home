@@ -110,6 +110,19 @@ test("buildProjectHomeQuickActions registers start and ship-note actions", () =>
   assert.equal(typeof actions[1].run, "function");
 });
 
+test("buildProjectHomeKeyboardShortcuts registers global and read-only board shortcuts", () => {
+  const helpers = projectHome.__test || {};
+  assert.equal(typeof helpers.buildProjectHomeKeyboardShortcuts, "function");
+
+  const shortcuts = helpers.buildProjectHomeKeyboardShortcuts();
+  assert.equal(shortcuts[0].id, "open-project-home");
+  assert.equal(shortcuts[0].combo, "Cmd+Shift+H");
+  assert.equal(shortcuts[0].remappable, true);
+  assert.ok(shortcuts.some((shortcut) => shortcut.id === "create-issue" && shortcut.combo === "C"));
+  assert.ok(shortcuts.some((shortcut) => shortcut.id === "focus-search" && shortcut.combo === "/"));
+  assert.equal(shortcuts.filter((shortcut) => shortcut.scope === "Project Home board").every((shortcut) => shortcut.remappable === false), true);
+});
+
 test("header icon controls opt out of Electron drag regions", () => {
   const helpers = projectHome.__test || {};
   assert.equal(typeof helpers.headerControlInteractionStyle, "function");

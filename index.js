@@ -34,6 +34,9 @@ const FOCUS_COMPOSER_LAUNCH_EVENT = "codexpp-focus-composer-launch";
 const QUICK_ACTIONS_REGISTER_EVENT = "codexpp-global-quick-actions-register";
 const QUICK_ACTIONS_UNREGISTER_EVENT = "codexpp-global-quick-actions-unregister";
 const QUICK_ACTIONS_REFRESH_EVENT = "codexpp-global-quick-actions-request-refresh";
+const SHORTCUTS_REGISTER_EVENT = "codexpp-keyboard-shortcuts-register";
+const SHORTCUTS_UNREGISTER_EVENT = "codexpp-keyboard-shortcuts-unregister";
+const SHORTCUTS_REFRESH_EVENT = "codexpp-keyboard-shortcuts-request-refresh";
 const QUICK_ACTIONS_SOURCE = "project-home";
 
 const IPC_BOARD_LIST = "project-home:issues:list";
@@ -116,7 +119,9 @@ module.exports = {
     window.removeEventListener("hashchange", state.onRouteChange);
     window.removeEventListener(ROUTE_EVENT, state.onRouteChange);
     if (state.quickActionsRefresh) window.removeEventListener(QUICK_ACTIONS_REFRESH_EVENT, state.quickActionsRefresh);
+    if (state.keyboardShortcutsRefresh) window.removeEventListener(SHORTCUTS_REFRESH_EVENT, state.keyboardShortcutsRefresh);
     unregisterProjectHomeQuickActions();
+    unregisterProjectHomeKeyboardShortcuts();
     state.restoreHistory?.();
     state.pageHandle?.unregister?.();
     if (state.settingsSaveResetTimer) window.clearTimeout(state.settingsSaveResetTimer);
@@ -796,6 +801,7 @@ function startRenderer(self, api) {
   state.onResize = () => syncProjectHomeHost(state);
   state.onRouteChange = () => handleRouteChange(state);
   state.quickActionsRefresh = () => registerProjectHomeQuickActions(state);
+  state.keyboardShortcutsRefresh = () => registerProjectHomeKeyboardShortcuts();
   state.restoreHistory = patchHistoryNavigation();
 
   window.addEventListener("pointerdown", state.onSearchPointerDown, true);
@@ -809,7 +815,9 @@ function startRenderer(self, api) {
   window.addEventListener("hashchange", state.onRouteChange);
   window.addEventListener(ROUTE_EVENT, state.onRouteChange);
   window.addEventListener(QUICK_ACTIONS_REFRESH_EVENT, state.quickActionsRefresh);
+  window.addEventListener(SHORTCUTS_REFRESH_EVENT, state.keyboardShortcutsRefresh);
   registerProjectHomeQuickActions(state);
+  registerProjectHomeKeyboardShortcuts();
 
   state.observer = new MutationObserver(() => {
     scheduleApply(state);
@@ -3758,6 +3766,22 @@ function unregisterProjectHomeQuickActions() {
   }));
 }
 
+function registerProjectHomeKeyboardShortcuts() {
+  window.dispatchEvent(new CustomEvent(SHORTCUTS_REGISTER_EVENT, {
+    detail: {
+      source: QUICK_ACTIONS_SOURCE,
+      sourceLabel: "Project Home",
+      shortcuts: buildProjectHomeKeyboardShortcuts(),
+    },
+  }));
+}
+
+function unregisterProjectHomeKeyboardShortcuts() {
+  window.dispatchEvent(new CustomEvent(SHORTCUTS_UNREGISTER_EVENT, {
+    detail: { source: QUICK_ACTIONS_SOURCE },
+  }));
+}
+
 function buildProjectHomeQuickActions(state = {}) {
   return [
     {
@@ -3781,6 +3805,83 @@ function buildProjectHomeQuickActions(state = {}) {
       disabledReason: "No Project Home context",
       isDisabled: (context) => !hasProjectHomeQuickActionContext(context),
       run: (context) => runProjectHomeQuickAction(state, "ship-note", context),
+    },
+  ];
+}
+
+function buildProjectHomeKeyboardShortcuts() {
+  return [
+    {
+      id: "open-project-home",
+      label: "Open Project Home",
+      combo: "Cmd+Shift+H",
+      description: "Open or close the current sidebar project's Project Home.",
+      keywords: ["project home", "home", "board"],
+      scope: "Global",
+      remappable: true,
+    },
+    {
+      id: "create-issue",
+      label: "Create Project Home issue",
+      combo: "C",
+      description: "Create an issue in the first visible Project Home column.",
+      keywords: ["project home", "issue", "create"],
+      scope: "Project Home board",
+      remappable: false,
+    },
+    {
+      id: "refresh-board",
+      label: "Refresh Project Home board",
+      combo: "R",
+      description: "Reload the current Project Home board.",
+      keywords: ["project home", "refresh", "reload"],
+      scope: "Project Home board",
+      remappable: false,
+    },
+    {
+      id: "focus-search",
+      label: "Focus Project Home search",
+      combo: "/",
+      description: "Focus and select the Project Home issue search field.",
+      keywords: ["project home", "search", "filter"],
+      scope: "Project Home board",
+      remappable: false,
+    },
+    {
+      id: "toggle-view",
+      label: "Toggle Project Home view",
+      combo: "V",
+      description: "Switch between board and list views.",
+      keywords: ["project home", "board", "list"],
+      scope: "Project Home board",
+      remappable: false,
+    },
+    {
+      id: "select-all-issues",
+      label: "Select all Project Home issues",
+      combo: "Cmd+A",
+      description: "Select all issues in the current Project Home board.",
+      keywords: ["project home", "select", "all"],
+      scope: "Project Home board",
+      remappable: false,
+    },
+    {
+      id: "clear-selection",
+      label: "Clear Project Home selection",
+      combo: "Esc",
+      description: "Clear the selected issues or close the issue editor.",
+      keywords: ["project home", "selection", "editor"],
+      scope: "Project Home board",
+      remappable: false,
+    },
+    {
+      id: "delete-hovered-or-selected",
+      label: "Delete Project Home issue",
+      combo: "Backspace",
+      description: "Delete selected issues, or the issue under the pointer.",
+      keywords: ["project home", "delete", "issue"],
+      scope: "Project Home board",
+      remappable: false,
     },
   ];
 }
@@ -6335,6 +6436,7 @@ module.exports.__test = {
   buildWorkSessionLaunchPayload,
   buildShipNoteLaunchPayload,
   buildProjectHomeQuickActions,
+  buildProjectHomeKeyboardShortcuts,
   headerControlInteractionStyle,
   isNativeSidebarToggleLabel,
 };
