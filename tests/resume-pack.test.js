@@ -93,6 +93,16 @@ test("buildShipNoteLaunchPayload marks an end-session launch for Focus Composer"
   assert.match(payload.requestedAt, /^\d{4}-\d{2}-\d{2}T/);
 });
 
+test("Focus Composer launches from Project Home restore the native chat route", () => {
+  const helpers = projectHome.__test || {};
+  assert.equal(typeof helpers.shouldRestoreNativeRouteForFocusLaunch, "function");
+
+  assert.equal(helpers.shouldRestoreNativeRouteForFocusLaunch({ kind: "work-session" }), true);
+  assert.equal(helpers.shouldRestoreNativeRouteForFocusLaunch({ kind: "ship-note" }), true);
+  assert.equal(helpers.shouldRestoreNativeRouteForFocusLaunch({ kind: "project-brain" }), true);
+  assert.equal(helpers.shouldRestoreNativeRouteForFocusLaunch({ kind: "open-composer" }), false);
+});
+
 test("buildProjectHomeQuickActions registers start and ship-note actions", () => {
   const helpers = projectHome.__test || {};
   assert.equal(typeof helpers.buildProjectHomeQuickActions, "function");

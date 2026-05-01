@@ -2867,17 +2867,17 @@ function insertProjectBrainPack(state, patch = null) {
       brain: patch ? normalizeProjectBrain({ ...(state.board?.brain || {}), ...patch }) : state.board?.brain,
     },
   });
-  window.dispatchEvent(new CustomEvent(FOCUS_COMPOSER_LAUNCH_EVENT, {
-    detail: {
-      version: 1,
-      source: QUICK_ACTIONS_SOURCE,
-      kind: "project-brain",
-      text: formatProjectBrainPack(snapshot || {}),
-      project: buildResumeSnapshot(state),
-      activeIssue: activeIssueBridgePayload(state),
-      requestedAt: new Date().toISOString(),
-    },
-  }));
+  const payload = {
+    version: 1,
+    source: QUICK_ACTIONS_SOURCE,
+    kind: "project-brain",
+    text: formatProjectBrainPack(snapshot || {}),
+    project: buildResumeSnapshot(state),
+    activeIssue: activeIssueBridgePayload(state),
+    requestedAt: new Date().toISOString(),
+  };
+  window.dispatchEvent(new CustomEvent(FOCUS_COMPOSER_LAUNCH_EVENT, { detail: payload }));
+  restoreNativeRouteAfterFocusLaunch(state, payload);
 }
 
 function openProjectCommandCenterSheet(state) {
@@ -4728,6 +4728,7 @@ function startFocusComposerLaunch(state, buildPayload, label) {
   const payload = buildPayload(state);
   try {
     window.dispatchEvent(new CustomEvent(FOCUS_COMPOSER_LAUNCH_EVENT, { detail: payload }));
+    restoreNativeRouteAfterFocusLaunch(state, payload);
     state.api.log.info(`[project-home] ${label} launch requested`, {
       projectPath: payload?.project?.projectPath || "",
       activeIssueId: payload?.activeIssue?.issueId || "",
@@ -4735,6 +4736,19 @@ function startFocusComposerLaunch(state, buildPayload, label) {
   } catch (error) {
     state.api.log.warn(`[project-home] ${label} launch failed`, { error: error?.message || String(error) });
   }
+}
+
+function restoreNativeRouteAfterFocusLaunch(state, payload) {
+  if (!shouldRestoreNativeRouteForFocusLaunch(payload)) return;
+  window.setTimeout(() => {
+    if (!state?.current || !state?.view) return;
+    closeProjectHome(state, { updateHistory: true });
+  }, 0);
+}
+
+function shouldRestoreNativeRouteForFocusLaunch(payload = {}) {
+  const kind = String(payload.kind || payload.mode || "").trim().toLowerCase();
+  return kind === "work-session" || kind === "ship-note" || kind === "project-brain" || kind === "latest-digest";
 }
 
 function registerProjectHomeQuickActions(state) {
@@ -8005,6 +8019,7 @@ module.exports.__test = {
   buildProjectBrainSnapshot,
   formatProjectBrainPack,
   normalizeProjectBrain,
+  shouldRestoreNativeRouteForFocusLaunch,
   buildProjectCommandSnapshot,
   formatProjectGitStatus,
   buildProjectHomeQuickActions,
