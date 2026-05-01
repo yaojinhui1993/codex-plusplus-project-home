@@ -1,9 +1,9 @@
 {
-  "name": "co.bennett.project-home",
-  "version": "1.0.0",
+  "name": "project-home",
+  "version": "999.0.0-local.1",
   "private": true,
-  "description": "Project Home tweak for Codex++: per-project Linear-style kanban board plus an MCP server.",
+  "description": "Local frozen Project Home tweak for Codex++: per-project Linear-style kanban board plus an MCP server.",
   "scripts": {
-    "test": "node tests/mcp.test.js"
+    "test": "node tests/mcp.test.js && node --test tests/resume-pack.test.js tests/backup-export.test.js"
   }
 }

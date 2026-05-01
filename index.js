@@ -8,6 +8,10 @@
 const STYLE_ID = "codexpp-project-home-style";
 const BUTTON_ATTR = "data-codexpp-project-home-button";
 const WRAPPER_ATTR = "data-codexpp-project-home-wrapper";
+const ACTION_BAR_ATTR = "data-codexpp-project-home-action-bar";
+const WRAPPER_CLASS = "codexpp-project-home-wrapper";
+const BUTTON_CLASS = "codexpp-project-home-button";
+const ACTION_BAR_CLASS = "codexpp-project-home-action-bar";
 const ACTIVE_ATTR = "data-codexpp-project-home-active";
 const VIEW_ATTR = "data-codexpp-project-home-view";
 const HASH_PATH_KEY = "codexpp-project-home";
@@ -22,6 +26,10 @@ const VIEW_MODE_STORAGE_KEY = "project-home:view-mode";
 const VISIBLE_COLUMNS_STORAGE_KEY = "project-home:visible-columns";
 const COLLAPSED_SECTIONS_STORAGE_KEY = "project-home:collapsed-sections";
 const SEARCH_QUERY_STORAGE_KEY = "project-home:search-query";
+const ACTIVE_ISSUE_STORAGE_KEY = "codexpp.project-home.activeIssue.v1";
+const ACTIVE_ISSUE_CHANGED_EVENT = "codexpp-project-home-active-issue-changed";
+const RESUME_PACK_STORAGE_KEY = "codexpp.project-home.resumePack.v1";
+const RESUME_PACK_CHANGED_EVENT = "codexpp-project-home-resume-pack-changed";
 
 const IPC_BOARD_LIST = "project-home:issues:list";
 const IPC_ISSUE_CREATE = "project-home:issue:create";
@@ -33,6 +41,9 @@ const IPC_OPEN_PROJECT_FOLDER = "project-home:project:open-folder";
 const IPC_OPEN_EXTERNAL = "project-home:external:open";
 const IPC_LINEAR_TEAMS = "project-home:linear:teams";
 const IPC_LINEAR_SYNC = "project-home:linear:sync";
+const IPC_BACKUP_CREATE = "project-home:backup:create";
+const IPC_BACKUP_EXPORT = "project-home:backup:export";
+const IPC_BACKUP_RESTORE = "project-home:backup:restore";
 const LINEAR_API_SETTINGS_URL = "https://linear.app/settings/api";
 
 const ISSUE_COLUMNS = [
@@ -129,6 +140,9 @@ function startMain(self, api) {
       removeMainHandler(api, IPC_OPEN_EXTERNAL);
       removeMainHandler(api, IPC_LINEAR_TEAMS);
       removeMainHandler(api, IPC_LINEAR_SYNC);
+      removeMainHandler(api, IPC_BACKUP_CREATE);
+      removeMainHandler(api, IPC_BACKUP_EXPORT);
+      removeMainHandler(api, IPC_BACKUP_RESTORE);
     },
   };
   self._state = state;
@@ -171,6 +185,14 @@ function startMain(self, api) {
   });
   replaceMainHandler(api, IPC_LINEAR_SYNC, async (payload) =>
     syncLinearIssues(store, requireProjectPath(payload), payload || {}));
+  replaceMainHandler(api, IPC_BACKUP_CREATE, (payload) =>
+    store.backupProject(requireProjectPath(payload)));
+  replaceMainHandler(api, IPC_BACKUP_EXPORT, (payload) => {
+    const backup = store.exportProject(requireProjectPath(payload));
+    return { backup, json: `${JSON.stringify(backup, null, 2)}\n` };
+  });
+  replaceMainHandler(api, IPC_BACKUP_RESTORE, (payload) =>
+    store.restoreProject(requireProjectPath(payload), payload?.backup || payload?.json || {}));
 
   api.log.info("[project-home] main issue store active", { root: store.root });
 }
@@ -535,8 +557,6 @@ function startRenderer(self, api) {
     settingsSaveStatus: "idle",
     settingsSheetOpen: false,
     editor: null,
-    editorFocusRequest: 0,
-    editorFocusApplied: 0,
     view: null,
     host: null,
     preservedRouteNodes: [],
@@ -805,6 +825,51 @@ function installStyle() {
       flex: none;
     }
 
+    .${WRAPPER_CLASS} {
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      flex: 0 0 auto !important;
+      width: 28px !important;
+      min-width: 28px !important;
+      height: 28px !important;
+      opacity: 1 !important;
+      visibility: visible !important;
+      transform: none !important;
+      pointer-events: auto !important;
+    }
+
+    [${ACTION_BAR_ATTR}="true"],
+    .${ACTION_BAR_CLASS} {
+      display: flex !important;
+      align-items: center !important;
+      justify-content: flex-end !important;
+      opacity: 1 !important;
+      visibility: visible !important;
+      transform: none !important;
+      pointer-events: auto !important;
+    }
+
+    .${BUTTON_CLASS} {
+      display: flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      width: 28px !important;
+      height: 28px !important;
+      min-width: 28px !important;
+      min-height: 28px !important;
+      padding: 0 !important;
+      opacity: 1 !important;
+      visibility: visible !important;
+      transform: none !important;
+    }
+
+    .${BUTTON_CLASS} svg {
+      width: 16px !important;
+      height: 16px !important;
+      display: block !important;
+    }
+
     body[${ACTIVE_ATTR}="true"] aside [data-app-action-sidebar-thread-active="true"],
     body[${ACTIVE_ATTR}="true"] aside [aria-current="page"] {
       background: transparent !important;
@@ -835,6 +900,8 @@ function installStyle() {
       overflow: hidden;
       background: transparent;
       color: var(--color-token-text-primary, var(--color-foreground, #111));
+      box-sizing: border-box;
+      padding-top: 44px;
     }
 
     [${VIEW_ATTR}="host"] {
@@ -864,12 +931,18 @@ function installStyle() {
     [${COLUMN_ATTR}] {
       min-width: 0;
       min-height: 0;
-      border-right: 1px solid var(--color-token-border-light, rgba(127,127,127,.14));
-      background: transparent;
+      border-right: 1px solid var(--color-token-border, rgba(0,0,0,.2));
+      background: var(--color-token-main-surface-primary, Canvas);
+      box-shadow: inset -1px 0 0 rgba(0,0,0,.035);
+    }
+
+    [${COLUMN_ATTR}]:nth-child(even) {
+      background: color-mix(in srgb, var(--color-token-main-surface-primary, Canvas) 96%, var(--color-token-foreground, #111));
     }
 
     [${COLUMN_ATTR}]:last-child {
       border-right: 0;
+      box-shadow: none;
     }
 
     [${COLUMN_ATTR}][data-drop-active="true"] {
@@ -879,8 +952,18 @@ function installStyle() {
     [${COLUMN_ATTR}] [data-column-header="true"] {
       height: 36px;
       padding: 0 12px;
-      border-top: 1px solid var(--color-token-border-light, rgba(127,127,127,.18));
-      border-bottom: 1px solid var(--color-token-border-light, rgba(127,127,127,.12));
+      border-top: 1px solid var(--color-token-border, rgba(0,0,0,.16));
+      border-bottom: 1px solid var(--color-token-border, rgba(0,0,0,.22));
+      background: color-mix(in srgb, var(--color-token-main-surface-primary, Canvas) 92%, var(--color-token-foreground, #111));
+    }
+
+    [${COLUMN_ATTR}] [data-column-list="true"] {
+      border-top: 1px solid rgba(0,0,0,.045);
+      background: linear-gradient(to bottom, rgba(0,0,0,.025), transparent 18px);
+    }
+
+    [${COLUMN_ATTR}] [data-column-empty="true"] {
+      opacity: .78;
     }
 
     [${COLUMN_ATTR}] [data-column-title] {
@@ -952,6 +1035,13 @@ function installStyle() {
       box-shadow: inset 0 0 0 1px var(--color-token-focus-border, #3b82f6);
     }
 
+    [${VIEW_ATTR}="issue-card"][data-active-issue="true"],
+    [${VIEW_ATTR}="list-row"][data-active-issue="true"] {
+      border-color: color-mix(in srgb, #10b981 72%, var(--color-token-border, rgba(0,0,0,.18)));
+      background: color-mix(in srgb, var(--color-token-main-surface-primary, Canvas) 88%, #10b981);
+      box-shadow: inset 0 0 0 1px color-mix(in srgb, #10b981 72%, transparent);
+    }
+
     [${VIEW_ATTR}="issue-card"] [data-issue-title] {
       font-size: 13px;
       line-height: 18px;
@@ -999,6 +1089,13 @@ function installStyle() {
     [${VIEW_ATTR}="issue-meta"] [data-pill][data-pill-overdue="true"] {
       color: #ef4444;
       border-color: rgba(239,68,68,.35);
+    }
+
+    [${VIEW_ATTR}="issue-meta"] [data-pill][data-pill-active="true"] {
+      color: #047857;
+      border-color: rgba(16,185,129,.44);
+      background: rgba(16,185,129,.10);
+      font-weight: 600;
     }
 
     [${VIEW_ATTR}="issue-meta"] [data-pill][data-pill-label] {
@@ -1218,6 +1315,8 @@ function installStyle() {
       min-height: 32px;
       padding: 0 14px;
       border: 1px solid transparent;
+      border-bottom-color: var(--color-token-border-light, rgba(0,0,0,.12));
+      background: var(--color-token-main-surface-primary, transparent);
       font-size: 13px;
       line-height: 18px;
       color: var(--color-token-text-primary, currentColor);
@@ -1237,6 +1336,10 @@ function installStyle() {
 
     [${VIEW_ATTR}="list-row"][data-dragging="true"] {
       opacity: .55;
+    }
+
+    [${VIEW_ATTR}="list-row"][data-active-issue="true"] {
+      border-left-color: #10b981;
     }
 
     [${VIEW_ATTR}="list-row"] [data-list-cell="status"] {
@@ -1397,13 +1500,18 @@ function installStyle() {
 
     [data-list-section-body] {
       min-height: 4px;
+      box-shadow: inset 0 1px 0 rgba(0,0,0,.035);
+    }
+
+    [data-list-section-body] [${VIEW_ATTR}="list-row"]:last-child {
+      border-bottom-color: var(--color-token-border, rgba(0,0,0,.16));
     }
 
     [data-list-empty] {
       padding: 6px 14px 10px;
       font-size: 12px;
       color: var(--color-token-description-foreground, currentColor);
-      opacity: .5;
+      opacity: .72;
     }
 
     [data-search-empty] {
@@ -1624,12 +1732,15 @@ function installStyle() {
     [${HEADER_ATTR}="root"] {
       min-width: 0;
       flex: 1;
+      min-height: 44px;
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 16px;
       padding-left: calc(var(--padding-toolbar-x, .5rem) + 16px);
       padding-right: var(--padding-toolbar-x, .5rem);
+      border-bottom: 1px solid var(--color-token-border-light, rgba(127,127,127,.16));
+      background: var(--color-token-main-surface-primary, Canvas);
       -webkit-app-region: no-drag;
     }
 
@@ -1655,10 +1766,10 @@ function installStyle() {
     }
 
     [${HEADER_ATTR}="identity"] [data-header-title] {
-      font-size: 13px;
-      font-weight: 600;
-      letter-spacing: -0.005em;
-      color: var(--color-token-foreground, currentColor);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: 0;
+      color: var(--color-token-description-foreground, currentColor);
     }
 
     [${HEADER_ATTR}="identity"] [data-header-separator] {
@@ -1686,6 +1797,40 @@ function installStyle() {
       outline: none;
       background: var(--color-token-list-hover-background, rgba(127,127,127,.10));
       color: var(--color-token-foreground, currentColor);
+    }
+
+    [${HEADER_ATTR}="active-issue"] {
+      min-width: 0;
+      max-width: min(360px, 26vw);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid rgba(16,185,129,.36);
+      border-radius: 7px;
+      background: rgba(16,185,129,.08);
+      color: color-mix(in srgb, #047857 72%, currentColor);
+      padding: 4px 8px;
+      font: inherit;
+      font-size: 12px;
+      line-height: 16px;
+    }
+
+    [${HEADER_ATTR}="active-issue"]:hover,
+    [${HEADER_ATTR}="active-issue"]:focus-visible {
+      outline: none;
+      background: rgba(16,185,129,.14);
+    }
+
+    [${HEADER_ATTR}="active-issue"] [data-active-label] {
+      flex: none;
+      font-weight: 650;
+    }
+
+    [${HEADER_ATTR}="active-issue"] [data-active-title] {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     [${VIEW_ATTR}="template-grid"] {
@@ -1766,6 +1911,8 @@ function applyProjectHomeButtons(state) {
       removeHomeButtonForRow(row);
       continue;
     }
+    actionBar.setAttribute(ACTION_BAR_ATTR, "true");
+    actionBar.classList.add(ACTION_BAR_CLASS);
 
     const path = projectPathFor(row);
     let wrapper = row.querySelector(`[${WRAPPER_ATTR}="true"]`);
@@ -1777,12 +1924,14 @@ function applyProjectHomeButtons(state) {
       button = createHomeButton(actionsButton);
       wrapper.appendChild(button);
     }
+    wrapper.classList.add(WRAPPER_CLASS);
+    button.classList.add(BUTTON_CLASS);
 
     button.dataset.projectPath = path || "";
     button.dataset.projectLabel = label || basenameFor(path, "Project");
     button.setAttribute("aria-label", `Open Project Home for ${label || basenameFor(path, "Project")}`);
     button.setAttribute("aria-keyshortcuts", "Meta+Shift+H");
-    button.title = path ? `Project Home: ${path} (Cmd+Shift+H)` : "Project Home (Cmd+Shift+H)";
+    button.title = "Project Home";
     setProjectHomeButtonActive(wrapper, button, state?.current, { path, label });
 
     if (wrapper.parentElement !== actionBar) {
@@ -1802,6 +1951,7 @@ function createHomeWrapper(templateWrapper) {
   const wrapper = document.createElement("div");
   wrapper.setAttribute(WRAPPER_ATTR, "true");
   wrapper.className = templateWrapper.className || "pr-0.5";
+  wrapper.classList.add(WRAPPER_CLASS);
   return wrapper;
 }
 
@@ -1813,6 +1963,7 @@ function createHomeButton(templateButton) {
   if (templateButton instanceof HTMLElement) {
     button.className = templateButton.className;
   }
+  button.classList.add(BUTTON_CLASS);
   button.innerHTML = homeIconSvg();
   return button;
 }
@@ -1879,11 +2030,9 @@ function renderProjectHomeView(state) {
     root.setAttribute(VIEW_ATTR, "root");
     root.setAttribute("role", "region");
     root.setAttribute("aria-label", "Project Home");
-    installProjectHomeEventBoundary(root);
     state.view = root;
   }
 
-  const focusSnapshot = captureProjectHomeEditorFocus(root);
   root.replaceChildren();
 
   const scroll = document.createElement("div");
@@ -1913,55 +2062,7 @@ function renderProjectHomeView(state) {
 
   scroll.append(contentBlock);
   root.append(scroll);
-  restoreProjectHomeEditorFocus(root, focusSnapshot);
-  applyPendingEditorFocus(state);
   scheduleProjectHomeMounts(state, project, token);
-}
-
-function captureProjectHomeEditorFocus(root) {
-  const active = document.activeElement;
-  if (!(root instanceof HTMLElement) || !(active instanceof HTMLElement) || !root.contains(active)) return null;
-  if (!active.closest(`[${VIEW_ATTR}="editor-panel"]`)) return null;
-  const name = active.getAttribute("name") || "";
-  if (!name) return null;
-  const snapshot = {
-    name,
-    selectionStart: null,
-    selectionEnd: null,
-  };
-  if (
-    active instanceof HTMLInputElement ||
-    active instanceof HTMLTextAreaElement
-  ) {
-    snapshot.selectionStart = active.selectionStart;
-    snapshot.selectionEnd = active.selectionEnd;
-  }
-  return snapshot;
-}
-
-function restoreProjectHomeEditorFocus(root, snapshot) {
-  if (!snapshot?.name || !(root instanceof HTMLElement)) return;
-  const restore = () => {
-    if (!root.isConnected) return;
-    const editor = root.querySelector(`[${VIEW_ATTR}="editor-panel"]`);
-    if (!(editor instanceof HTMLElement)) return;
-    if (document.activeElement instanceof HTMLElement && editor.contains(document.activeElement)) return;
-    const field = Array.from(editor.querySelectorAll("input, textarea, select"))
-      .find((node) => node instanceof HTMLElement && node.getAttribute("name") === snapshot.name);
-    if (!(field instanceof HTMLElement)) return;
-    field.focus({ preventScroll: true });
-    if (
-      (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) &&
-      typeof snapshot.selectionStart === "number" &&
-      typeof snapshot.selectionEnd === "number"
-    ) {
-      try {
-        field.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
-      } catch {}
-    }
-  };
-  restore();
-  window.requestAnimationFrame(restore);
 }
 
 function renderProjectHomeError(message) {
@@ -1970,26 +2071,6 @@ function renderProjectHomeError(message) {
     "m-2 rounded-lg border border-token-border bg-token-input-background px-3 py-3 text-sm text-token-description-foreground";
   error.textContent = message;
   return error;
-}
-
-function installProjectHomeEventBoundary(root) {
-  const stop = (event) => {
-    event.stopPropagation();
-  };
-  for (const type of [
-    "pointerdown",
-    "mousedown",
-    "mouseup",
-    "click",
-    "dblclick",
-    "keydown",
-    "keypress",
-    "keyup",
-    "beforeinput",
-    "input",
-  ]) {
-    root.addEventListener(type, stop);
-  }
 }
 
 function renderSearchEmpty(state) {
@@ -2423,6 +2504,7 @@ function renderIssueBoard(state, project) {
     header.append(title, add);
 
     const list = document.createElement("div");
+    list.setAttribute("data-column-list", "true");
     list.className = "flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto px-2 py-2";
     list.addEventListener("dragover", (event) => {
       event.preventDefault();
@@ -2446,6 +2528,7 @@ function renderIssueBoard(state, project) {
     }
     if (columnIssues.length === 0) {
       const empty = document.createElement("div");
+      empty.setAttribute("data-column-empty", "true");
       empty.className =
         "flex min-h-16 items-center justify-center px-3 text-center text-xs text-token-description-foreground opacity-60";
       empty.textContent = state.boardLoading ? "Loading..." : "No issues";
@@ -2679,6 +2762,7 @@ function renderIssueRow(state, issue) {
   row.dataset.issueId = issue.id;
   const selected = isIssueSelected(state, issue.id);
   if (selected) row.dataset.selected = "true";
+  if (isActiveIssue(state, issue)) row.dataset.activeIssue = "true";
   row.setAttribute("aria-selected", String(selected));
   row.setAttribute("role", "button");
   row.setAttribute("tabindex", "0");
@@ -3025,32 +3109,21 @@ function renderIssueEditor(state) {
   panel.append(form);
   backdrop.append(panel);
 
-  if (!isEdit) titleInput.setAttribute("data-editor-autofocus", "");
+  focusIssueTitleInput(titleInput, { select: !isEdit });
 
   return backdrop;
 }
 
 function focusIssueTitleInput(input, options = {}) {
   if (!(input instanceof HTMLInputElement)) return;
-  if (!input.isConnected || document.activeElement === input) return;
-  input.focus({ preventScroll: true });
-  if (options.select) input.select();
-}
-
-function applyPendingEditorFocus(state) {
-  if (!state.editor || state.editorFocusApplied === state.editorFocusRequest) return;
-  const root = state.view;
-  if (!(root instanceof HTMLElement) || !root.isConnected) return;
-  const editor = root.querySelector(`[${VIEW_ATTR}="editor-panel"]`);
-  if (!(editor instanceof HTMLElement)) return;
-  if (document.activeElement instanceof HTMLElement && editor.contains(document.activeElement)) {
-    state.editorFocusApplied = state.editorFocusRequest;
-    return;
-  }
-  const input = editor.querySelector("[data-editor-autofocus]");
-  if (!(input instanceof HTMLInputElement)) return;
-  focusIssueTitleInput(input, { select: true });
-  state.editorFocusApplied = state.editorFocusRequest;
+  const focus = () => {
+    if (!input.isConnected) return;
+    input.focus({ preventScroll: true });
+    if (options.select) input.select();
+  };
+  focus();
+  window.requestAnimationFrame(focus);
+  for (const delay of [0, 16, 60, 140]) window.setTimeout(focus, delay);
 }
 
 function createStatusChip(state, value) {
@@ -3334,6 +3407,8 @@ function renderIssueCard(state, project, issue) {
   card.dataset.status = issue.status || "backlog";
   const selected = isIssueSelected(state, issue.id);
   if (selected) card.dataset.selected = "true";
+  const active = isActiveIssue(state, issue);
+  if (active) card.dataset.activeIssue = "true";
   card.setAttribute("aria-selected", String(selected));
   card.className = "group flex flex-col gap-1.5 px-3 py-2.5";
   card.addEventListener("dragstart", (event) => {
@@ -3412,6 +3487,9 @@ function renderIssueCard(state, project, issue) {
   const meta = document.createElement("div");
   meta.setAttribute(VIEW_ATTR, "issue-meta");
   meta.className = "flex flex-wrap items-center gap-1";
+  if (active) {
+    meta.append(issuePill("Active", { active: true }));
+  }
   const priorityValue = String(issue.priority || "none").toLowerCase();
   if (priorityValue && priorityValue !== "none") {
     meta.append(issuePill(priorityLabel(issue.priority), { priority: priorityValue }));
@@ -3443,6 +3521,7 @@ function issuePill(text, options = {}) {
   } else {
     if (options.priority) pill.setAttribute("data-pill-priority", options.priority);
     if (options.overdue) pill.setAttribute("data-pill-overdue", "true");
+    if (options.active) pill.setAttribute("data-pill-active", "true");
     if (options.className) pill.className = options.className;
   }
   pill.textContent = text || "None";
@@ -3490,19 +3569,20 @@ async function loadProjectHomeBoard(state, project, options = {}) {
   if (state.boardLoading && !options.force) return;
   state.boardLoading = true;
   state.boardError = "";
-  let shouldRender = true;
   try {
     const board = await state.api.ipc.invoke(IPC_BOARD_LIST, { projectPath: project.path });
     if (state.disposed || !sameProject(state.current, project)) return;
     state.board = normalizeBoard(board);
-    shouldRender = !state.editor;
+    syncSharedActiveIssue(state);
+    syncSharedResumePack(state);
+    state.headerSignature = "";
   } catch (error) {
     if (state.disposed || !sameProject(state.current, project)) return;
     state.boardError = `Could not load issues: ${error?.message || String(error)}`;
   } finally {
     if (!state.disposed && sameProject(state.current, project)) {
       state.boardLoading = false;
-      if (shouldRender) renderProjectHomeView(state);
+      renderProjectHomeView(state);
     }
   }
 }
@@ -3569,6 +3649,161 @@ function toggleIssueLabel(state, issue, label, forceAdd = false) {
   setIssueLabels(state, issue, Array.from(labels));
 }
 
+function activeIssueId(state) {
+  return String(state.board?.settings?.activeIssueId || "").trim();
+}
+
+function activeIssueForState(state) {
+  const id = activeIssueId(state);
+  if (!id) return null;
+  return (state.board?.issues || []).find((issue) => issue.id === id) || null;
+}
+
+function isActiveIssue(state, issue) {
+  return !!(issue?.id && issue.id === activeIssueId(state));
+}
+
+async function setActiveIssue(state, issue) {
+  const projectPath = state.current?.path || "";
+  if (!projectPath) return;
+  await mutateBoard(state, IPC_SETTINGS_UPDATE, {
+    projectPath,
+    settings: {
+      activeIssueId: issue?.id || "",
+    },
+  });
+  syncSharedActiveIssue(state);
+  state.headerSignature = "";
+  syncHeaderForProjectHome(state);
+}
+
+function syncSharedActiveIssue(state) {
+  const payload = activeIssueBridgePayload(state);
+  try {
+    if (payload) {
+      window.localStorage?.setItem?.(ACTIVE_ISSUE_STORAGE_KEY, JSON.stringify(payload));
+    } else {
+      const existing = readSharedActiveIssue();
+      if (!existing || existing.projectPath === state.current?.path) {
+        window.localStorage?.removeItem?.(ACTIVE_ISSUE_STORAGE_KEY);
+      }
+    }
+    window.dispatchEvent(new CustomEvent(ACTIVE_ISSUE_CHANGED_EVENT, { detail: payload || null }));
+  } catch (error) {
+    state.api.log.warn("[project-home] active issue bridge write failed", { error: error?.message || String(error) });
+  }
+}
+
+function syncSharedResumePack(state) {
+  const payload = buildResumeSnapshot(state);
+  try {
+    if (payload) {
+      window.localStorage?.setItem?.(RESUME_PACK_STORAGE_KEY, JSON.stringify(payload));
+    } else {
+      window.localStorage?.removeItem?.(RESUME_PACK_STORAGE_KEY);
+    }
+    window.dispatchEvent(new CustomEvent(RESUME_PACK_CHANGED_EVENT, { detail: payload || null }));
+  } catch (error) {
+    state.api.log.warn("[project-home] resume pack bridge write failed", { error: error?.message || String(error) });
+  }
+}
+
+function activeIssueBridgePayload(state) {
+  const issue = activeIssueForState(state);
+  if (!issue) return null;
+  return {
+    version: 1,
+    source: "project-home",
+    projectPath: state.current?.path || "",
+    projectLabel: state.current?.label || basenameFor(state.current?.path, "Project"),
+    issueId: issue.id || "",
+    title: issue.title || "Untitled issue",
+    description: issue.description || "",
+    status: issue.status || "",
+    priority: issue.priority || "none",
+    labels: Array.isArray(issue.labels) ? issue.labels.slice(0, 12) : [],
+    assignee: issue.assignee || "",
+    dueDate: issue.dueDate || "",
+    comments: Array.isArray(issue.comments) ? issue.comments.slice(-3).map((comment) => ({
+      author: comment.author || "",
+      body: comment.body || "",
+      createdAt: comment.createdAt || "",
+    })) : [],
+    updatedAt: issue.updatedAt || "",
+    setAt: new Date().toISOString(),
+  };
+}
+
+function buildResumeSnapshot(state) {
+  const issues = Array.isArray(state?.board?.issues) ? state.board.issues : [];
+  const current = state?.current || {};
+  if (!current.path && !current.label && issues.length === 0) return null;
+  const openIssues = issues.filter((issue) => !isDoneStatus(issue.status));
+  const openCounts = {};
+  for (const issue of openIssues) {
+    const status = String(issue.status || "backlog").trim() || "backlog";
+    openCounts[status] = (openCounts[status] || 0) + 1;
+  }
+  const activeId = String(state?.board?.settings?.activeIssueId || "").trim();
+  const activeIssue = issues.find((issue) => issue.id === activeId);
+  return {
+    version: 1,
+    source: "project-home",
+    projectPath: current.path || "",
+    projectLabel: current.label || basenameFor(current.path, "Project"),
+    activeIssue: issueResumeItem(activeIssue, { includeDescription: true }),
+    openCounts,
+    focusIssues: openIssues
+      .slice()
+      .sort(compareResumeIssue)
+      .slice(0, 6)
+      .map((issue) => issueResumeItem(issue))
+      .filter(Boolean),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function isDoneStatus(status) {
+  return String(status || "").trim().toLowerCase() === "done";
+}
+
+function issueResumeItem(issue, options = {}) {
+  if (!issue?.id) return null;
+  const item = {
+    id: issue.id || "",
+    issueId: issue.id || "",
+    title: issue.title || "Untitled issue",
+    status: issue.status || "",
+    priority: issue.priority || "none",
+    labels: Array.isArray(issue.labels) ? issue.labels.slice(0, 12) : [],
+    assignee: issue.assignee || "",
+    dueDate: issue.dueDate || "",
+    updatedAt: issue.updatedAt || "",
+  };
+  if (options.includeDescription) item.description = issue.description || "";
+  return item;
+}
+
+function compareResumeIssue(a, b) {
+  return priorityRank(a.priority) - priorityRank(b.priority) ||
+    String(a.status || "").localeCompare(String(b.status || "")) ||
+    (Number(a.rank) || 0) - (Number(b.rank) || 0) ||
+    String(a.id || "").localeCompare(String(b.id || ""));
+}
+
+function priorityRank(priority) {
+  return ({ urgent: 0, high: 1, medium: 2, low: 3, none: 4 })[String(priority || "none").toLowerCase()] ?? 4;
+}
+
+function readSharedActiveIssue() {
+  try {
+    const raw = window.localStorage?.getItem?.(ACTIVE_ISSUE_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 function openNewChatFromIssue(state, issue) {
   const target = findNewChatButton();
   if (!target) return;
@@ -3632,13 +3867,19 @@ async function mutateBoard(state, channel, payload) {
     if (payload?.status) ensureStatusVisible(state, payload.status);
     const result = await state.api.ipc.invoke(channel, payload);
     const board = result?.board || result;
-    if (board) state.board = normalizeBoard(board);
+    if (board) {
+      state.board = normalizeBoard(board);
+      syncSharedActiveIssue(state);
+      syncSharedResumePack(state);
+      state.headerSignature = "";
+    }
     const issueId = result?.issue?.id || payload?.issueId || "";
     if (issueId && channel !== IPC_ISSUE_DELETE && linearSyncReady(state.board)) {
       syncIssueToLinearInBackground(state, payload.projectPath, issueId);
     }
     state.boardError = "";
     renderProjectHomeView(state);
+    syncHeaderForProjectHome(state);
     return result;
   } catch (error) {
     state.boardError = error?.message || String(error);
@@ -3739,6 +3980,13 @@ function openIssueContextMenu(state, issue, x, y) {
 
   menu.append(contextMenuItem("Edit details", editIconSvg(), () =>
     openIssueEditor(state, { mode: "edit", issue })));
+  if (isActiveIssue(state, issue)) {
+    menu.append(contextMenuItem("Clear active issue", xIconSvg(), () =>
+      setActiveIssue(state, null)));
+  } else {
+    menu.append(contextMenuItem("Set active issue", checkIconSvg(), () =>
+      setActiveIssue(state, issue)));
+  }
   menu.append(contextMenuSubmenu("Change status", columnsIconSvg(),
     issueColumns(state).map((column) => ({
       label: column.title,
@@ -4175,6 +4423,15 @@ async function copyToClipboard(text) {
   }
 }
 
+async function readClipboardText() {
+  try {
+    if (navigator.clipboard?.readText) {
+      return String(await navigator.clipboard.readText());
+    }
+  } catch {}
+  return String(window.prompt("Paste Project Home export JSON") || "");
+}
+
 function contextMenuSubmenu(label, icon, items) {
   const wrap = document.createElement("div");
   wrap.setAttribute(CONTEXT_MENU_ATTR, "submenu");
@@ -4398,14 +4655,12 @@ function toggleSectionCollapsed(state, columnId) {
 
 function openIssueEditor(state, editor) {
   state.editor = editor;
-  state.editorFocusRequest += 1;
   closeProjectHomeContextMenu(state);
   renderProjectHomeView(state);
 }
 
 function closeIssueEditor(state) {
   state.editor = null;
-  state.editorFocusApplied = state.editorFocusRequest;
   renderProjectHomeView(state);
 }
 
@@ -4569,10 +4824,6 @@ function handleRouteChange(state) {
       state.board = null;
       state.boardError = "";
     }
-    if (!changed && state.editor) {
-      if (!state.board) loadProjectHomeBoard(state, routeProject);
-      return;
-    }
     renderProjectHomeView(state);
     if (changed || !state.board) loadProjectHomeBoard(state, routeProject);
     return;
@@ -4651,7 +4902,6 @@ function mountProjectHomeRoot(state, host, root) {
   host.setAttribute(VIEW_ATTR, "host");
   state.host = host;
   syncHeaderForProjectHome(state);
-  applyPendingEditorFocus(state);
 }
 
 function restoreProjectHomeHost(state, root = state.view) {
@@ -4828,11 +5078,14 @@ function shouldSyncProjectHomeHeader(state) {
 
 function renderProjectHomeHeader(state, node) {
   const project = state.current || {};
+  const active = activeIssueForState(state);
   const signature = [
     project.path || "",
     project.label || "",
     state.viewMode || "board",
     Array.from(state.visibleColumns || []).sort().join(","),
+    active?.id || "",
+    active?.title || "",
   ].join("\n");
   if (state.headerSignature === signature && node.childNodes.length > 0) return;
   state.headerSignature = signature;
@@ -4868,6 +5121,12 @@ function renderProjectHomeHeader(state, node) {
     }
   });
   identity.append(title, separator, folder);
+  if (active) {
+    const activeSeparator = document.createElement("span");
+    activeSeparator.setAttribute("data-header-separator", "");
+    activeSeparator.setAttribute("aria-hidden", "true");
+    identity.append(activeSeparator, renderActiveIssueHeaderChip(state, active));
+  }
 
   const controls = document.createElement("div");
   controls.className = "flex shrink-0 items-center gap-2";
@@ -4876,10 +5135,32 @@ function renderProjectHomeHeader(state, node) {
     renderIssueSearch(state),
     renderViewModeToggle(state),
     renderColumnMenuButton(state),
+    renderBackupMenuButton(state),
     renderProjectSettingsButton(state),
   );
 
   node.append(identity, controls);
+}
+
+function renderActiveIssueHeaderChip(state, issue) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.setAttribute(HEADER_ATTR, "active-issue");
+  button.setAttribute("aria-label", `Open active issue ${issue.id}`);
+  button.title = `Active issue: ${issue.id} ${issue.title || ""}`.trim();
+  const label = document.createElement("span");
+  label.setAttribute("data-active-label", "");
+  label.textContent = "Active";
+  const title = document.createElement("span");
+  title.setAttribute("data-active-title", "");
+  title.textContent = `${issue.id} ${issue.title || ""}`.trim();
+  button.append(label, title);
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openIssueEditor(state, { mode: "edit", issue });
+  });
+  return button;
 }
 
 function renderIssueSearch(state) {
@@ -5013,6 +5294,13 @@ function renderColumnMenuButton(state) {
   });
 }
 
+function renderBackupMenuButton(state) {
+  return headerIconButton("Backup / export", hardDriveIconSvg(), (event, button) => {
+    const rect = button.getBoundingClientRect();
+    openBackupMenu(state, rect.left, rect.bottom + 6);
+  });
+}
+
 function renderProjectSettingsButton(state) {
   return headerIconButton("Project Home settings", settingsIconSvg(), () => {
     state.settingsSheetOpen = true;
@@ -5023,6 +5311,7 @@ function renderProjectSettingsButton(state) {
 function headerIconButton(label, icon, onClick) {
   const button = document.createElement("button");
   button.type = "button";
+  applyHeaderControlInteractionStyle(button);
   button.className =
     "flex size-8 items-center justify-center rounded-md text-token-description-foreground hover:bg-token-list-hover-background hover:text-token-foreground focus-visible:outline-token-border focus-visible:outline-2";
   button.setAttribute("aria-label", label);
@@ -5034,6 +5323,24 @@ function headerIconButton(label, icon, onClick) {
     onClick(event, button);
   });
   return button;
+}
+
+function applyHeaderControlInteractionStyle(node) {
+  if (!node?.style) return;
+  const style = headerControlInteractionStyle();
+  node.style.webkitAppRegion = style.webkitAppRegion;
+  node.style.pointerEvents = style.pointerEvents;
+  node.style.position = style.position;
+  node.style.zIndex = style.zIndex;
+}
+
+function headerControlInteractionStyle() {
+  return {
+    webkitAppRegion: "no-drag",
+    pointerEvents: "auto",
+    position: "relative",
+    zIndex: "20",
+  };
 }
 
 function openColumnVisibilityMenu(state, x, y) {
@@ -5069,6 +5376,86 @@ function openColumnVisibilityMenu(state, x, y) {
   menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
   state.contextMenu = menu;
   window.setTimeout(() => installContextMenuDismiss(state, menu), 0);
+}
+
+function openBackupMenu(state, x, y) {
+  closeProjectHomeContextMenu(state);
+  const menu = document.createElement("div");
+  menu.setAttribute(CONTEXT_MENU_ATTR, "root");
+  menu.setAttribute("role", "menu");
+
+  menu.append(
+    contextMenuItem("Create local backup", hardDriveIconSvg(), () => void createLocalBackup(state)),
+    contextMenuItem("Copy JSON export", copyIconSvg(), () => void copyProjectExportJson(state)),
+    contextMenuItem("Restore from clipboard", refreshIconSvg(), () => void restoreProjectFromClipboard(state)),
+  );
+
+  document.body.append(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+  state.contextMenu = menu;
+  window.setTimeout(() => installContextMenuDismiss(state, menu), 0);
+}
+
+async function createLocalBackup(state) {
+  const projectPath = state.current?.path || "";
+  if (!projectPath) return;
+  try {
+    const result = await state.api.ipc.invoke(IPC_BACKUP_CREATE, { projectPath });
+    window.alert(`Project Home backup saved:\n${result?.path || ""}`);
+  } catch (error) {
+    window.alert(`Project Home backup failed:\n${error?.message || String(error)}`);
+  }
+}
+
+async function copyProjectExportJson(state) {
+  const projectPath = state.current?.path || "";
+  if (!projectPath) return;
+  try {
+    const result = await state.api.ipc.invoke(IPC_BACKUP_EXPORT, { projectPath });
+    const copied = await copyToClipboard(result?.json || `${JSON.stringify(result?.backup || {}, null, 2)}\n`);
+    window.alert(copied ? "Project Home export JSON copied." : "Could not copy Project Home export JSON.");
+  } catch (error) {
+    window.alert(`Project Home export failed:\n${error?.message || String(error)}`);
+  }
+}
+
+async function restoreProjectFromClipboard(state) {
+  const projectPath = state.current?.path || "";
+  if (!projectPath) return;
+  try {
+    const text = await readClipboardText();
+    if (!text.trim()) {
+      window.alert("Clipboard is empty. Copy a Project Home export JSON first.");
+      return;
+    }
+    const backup = JSON.parse(text);
+    if (!isProjectHomeBackupPayload(backup)) {
+      throw new Error("Clipboard JSON does not look like a Project Home export.");
+    }
+    if (!window.confirm("Restore Project Home from clipboard JSON? This replaces the current board for this project.")) {
+      return;
+    }
+    const board = await state.api.ipc.invoke(IPC_BACKUP_RESTORE, { projectPath, backup });
+    state.board = normalizeBoard(board);
+    state.boardError = "";
+    clearIssueSelection(state, { render: false });
+    syncSharedActiveIssue(state);
+    syncSharedResumePack(state);
+    state.headerSignature = "";
+    renderProjectHomeView(state);
+    syncHeaderForProjectHome(state);
+    window.alert(`Project Home restored ${state.board.issues.length} issue${state.board.issues.length === 1 ? "" : "s"}.`);
+  } catch (error) {
+    window.alert(`Project Home restore failed:\n${error?.message || String(error)}`);
+  }
+}
+
+function isProjectHomeBackupPayload(value) {
+  if (!value || typeof value !== "object") return false;
+  const source = value.board || value.project || value;
+  return value.format === "project-home-backup" || Array.isArray(source?.issues);
 }
 
 function patchHistoryNavigation() {
@@ -5600,6 +5987,14 @@ function copyIconSvg() {
   );
 }
 
+function hardDriveIconSvg() {
+  return iconSvg(
+    '<path d="M22 12H2"></path>' +
+      '<path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path>' +
+      '<path d="M6 16h.01"></path><path d="M10 16h.01"></path>',
+  );
+}
+
 function refreshIconSvg() {
   return iconSvg(
     '<path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"></path>' +
@@ -5730,3 +6125,8 @@ function iconSvg(paths) {
     "</svg>"
   );
 }
+
+module.exports.__test = {
+  buildResumeSnapshot,
+  headerControlInteractionStyle,
+};

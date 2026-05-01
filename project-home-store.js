@@ -37,6 +37,40 @@ function createIssueStore(options = {}) {
     columns: DEFAULT_COLUMNS.map((column) => ({ ...column })),
     issueDefaults: cloneIssueDefaults(issueDefaults),
 
+    exportProject(projectPath, options = {}) {
+      const db = readProjectDb(issuesDir, projectPath, issueDefaults);
+      return projectBackupPayload(db, options.now);
+    },
+
+    backupProject(projectPath, options = {}) {
+      const db = readProjectDb(issuesDir, projectPath, issueDefaults);
+      const backup = projectBackupPayload(db, options.now);
+      const backupDir = path.join(root, "backups", "project-home");
+      fs.mkdirSync(backupDir, { recursive: true });
+      const fileName = `${backupFileSlug(db.projectPath, db.key)}-${backupTimestamp(backup.exportedAt)}.json`;
+      const filePath = path.join(backupDir, fileName);
+      fs.writeFileSync(filePath, `${JSON.stringify(backup, null, 2)}\n`, "utf8");
+      return { path: filePath, backup };
+    },
+
+    restoreProject(projectPath, input = {}) {
+      const backup = parseBackupInput(input);
+      const source = backup.board || backup.project || backup;
+      const normalizedProjectPath = cleanText(projectPath) || cleanText(source.projectPath) || "unknown-project";
+      const file = projectFile(issuesDir, normalizedProjectPath);
+      const db = normalizeDb({
+        projectPath: normalizedProjectPath,
+        key: source.key || backup.key,
+        columns: source.columns,
+        issueDefaults: source.issueDefaults,
+        settings: source.settings,
+        nextNumber: backup.nextNumber || source.nextNumber,
+        issues: source.issues,
+      }, normalizedProjectPath, file, issueDefaults);
+      writeProjectDb(issuesDir, db);
+      return publicBoard(db);
+    },
+
     list(projectPath) {
       const db = readProjectDb(issuesDir, projectPath, issueDefaults);
       return publicBoard(db);
@@ -156,6 +190,9 @@ function createIssueStore(options = {}) {
       const index = db.issues.findIndex((item) => item.id === issueId);
       if (index < 0) return null;
       const [issue] = db.issues.splice(index, 1);
+      if (db.settings?.activeIssueId === issue.id) {
+        db.settings = normalizeSettings({ ...db.settings, activeIssueId: "" });
+      }
       normalizeRanks(db);
       writeProjectDb(issuesDir, db);
       return { issue, board: publicBoard(db) };
@@ -275,13 +312,17 @@ function writeProjectDb(issuesDir, db) {
 function normalizeDb(raw, projectPath, file, issueDefaults = ISSUE_DEFAULTS) {
   const defaults = normalizeIssueDefaults(raw.issueDefaults || issueDefaults);
   const issues = Array.isArray(raw.issues) ? raw.issues.map(normalizeIssue).filter(Boolean) : [];
+  const settings = normalizeSettings(raw.settings);
+  if (settings.activeIssueId && !issues.some((issue) => issue.id === settings.activeIssueId)) {
+    settings.activeIssueId = "";
+  }
   const db = {
     projectPath,
     key: projectKey(projectPath),
     file,
     columns: normalizeColumns(raw.columns, issues),
     issueDefaults: defaults,
-    settings: normalizeSettings(raw.settings),
+    settings,
     nextNumber: Math.max(Number(raw.nextNumber) || 1, maxIssueNumber(issues) + 1),
     issues,
   };
@@ -319,6 +360,41 @@ function publicBoard(db) {
     settings: normalizeSettings(db.settings),
     issues: [...db.issues].sort(compareIssueRank),
   };
+}
+
+function projectBackupPayload(db, now = new Date().toISOString()) {
+  return {
+    format: "project-home-backup",
+    version: 1,
+    exportedAt: exportTimestamp(now),
+    projectPath: db.projectPath,
+    key: db.key,
+    nextNumber: db.nextNumber,
+    board: publicBoard(db),
+  };
+}
+
+function parseBackupInput(input = {}) {
+  if (typeof input === "string") {
+    const text = input.trim();
+    return text ? JSON.parse(text) : {};
+  }
+  return input && typeof input === "object" ? input : {};
+}
+
+function exportTimestamp(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString();
+  const text = cleanText(value);
+  return text || new Date().toISOString();
+}
+
+function backupTimestamp(value) {
+  return exportTimestamp(value).replace(/[:.]/g, "-");
+}
+
+function backupFileSlug(projectPath, fallback = "project") {
+  const base = path.basename(cleanText(projectPath)) || cleanText(fallback) || "project";
+  return base.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "project";
 }
 
 function projectFile(issuesDir, projectPath) {
@@ -511,6 +587,7 @@ function normalizeSettings(settings) {
   const source = settings && typeof settings === "object" ? settings : {};
   return {
     linear: normalizeLinearSettings(source.linear),
+    activeIssueId: cleanText(source.activeIssueId),
   };
 }
 

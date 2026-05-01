@@ -226,8 +226,16 @@ function check(label, cond, detail = "") {
     check("settings save persists Linear config", settingsBoard.settings.linear.teamId === "team-settings" && settingsBoard.settings.linear.enabled === true);
     check("settings save keeps API key", settingsBoard.settings.linear.apiKey === "lin_api_settings");
     check("settings save keeps assigned-only flag", settingsBoard.settings.linear.assignedToMeOnly === true);
+    const settingsIssue = settingsStore.create(projectPath, { title: "Active bridge issue" }).issue;
+    const activeBoard = settingsStore.updateSettings(projectPath, {
+      activeIssueId: settingsIssue.id,
+    });
+    check("settings save keeps active issue id", activeBoard.settings.activeIssueId === settingsIssue.id);
     const settingsReloaded = settingsStore.list(projectPath);
     check("settings reload from disk", settingsReloaded.settings.linear.defaultSyncMode === "write");
+    check("settings reload keeps active issue id", settingsReloaded.settings.activeIssueId === settingsIssue.id);
+    const afterActiveDelete = settingsStore.delete(projectPath, settingsIssue.id);
+    check("delete clears active issue id", afterActiveDelete.board.settings.activeIssueId === "");
     try { fs.rmSync(settingsRoot, { recursive: true, force: true }); } catch {}
 
   } catch (err) {

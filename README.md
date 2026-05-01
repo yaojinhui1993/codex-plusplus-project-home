@@ -1,5 +1,10 @@
 # Project Home
 
+Local frozen copy for yjh. This directory intentionally uses the local tweak id
+`project-home` so Codex++ keeps the MCP server name as `project-home`, while
+future reinstalls of the upstream `co.bennett.project-home` tweak do not
+overwrite these UI customizations.
+
 Adds a hover-only home icon to Codex project rows. Clicking it, or pressing `Cmd+Shift+H` from a project thread, opens a Project Home view for that project.
 
 V1 includes a per-project kanban board for Linear-style issues:
@@ -8,6 +13,8 @@ V1 includes a per-project kanban board for Linear-style issues:
 - Create issues from the board or a column header
 - Drag issues between columns
 - Right-click or use the issue ellipsis menu to edit, move, or delete
+- Right-click an issue and choose `Set active issue` to bridge it into Focus Composer
+- Publishes a local project snapshot so Focus Composer can build `Session Resume Pack` handoffs
 - Issues are stored in a JSON DB keyed by project path
 
 The tweak also includes `mcp-server.js`, a stdio MCP server backed by the same issue store. Tools:
@@ -37,10 +44,10 @@ Codex++ does not currently forward `manifest.json#mcp` into Codex's own MCP runt
 ```toml
 [mcp_servers.project-home]
 command = "node"
-args = ["/ABSOLUTE/PATH/TO/codex-plusplus/tweaks/co.bennett.project-home/mcp-server.js"]
+args = ["/ABSOLUTE/PATH/TO/codex-plusplus/tweaks/project-home/mcp-server.js"]
 ```
 
-On macOS the absolute path is typically `/Users/<you>/Library/Application Support/codex-plusplus/tweaks/co.bennett.project-home/mcp-server.js`.
+On macOS the absolute path is typically `/Users/<you>/Library/Application Support/codex-plusplus/tweaks/project-home/mcp-server.js`.
 
 To verify, ask Codex "what MCPs can you see?" — `project-home` should appear with the `project_home_*` tools. Once upstream Codex++ auto-registers MCP entries from tweak manifests, this manual step can go away.
 
@@ -69,8 +76,8 @@ Don't want to edit TOML by hand? Open a Codex chat and paste the block below. Co
 Install the project-home MCP for me. Steps, in order:
 
 1. Resolve the absolute path to `mcp-server.js` for the project-home tweak. On macOS this is:
-   `/Users/$USER/Library/Application Support/codex-plusplus/tweaks/co.bennett.project-home/mcp-server.js`
-   On Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/codex-plusplus/tweaks/co.bennett.project-home/mcp-server.js`
+   `/Users/$USER/Library/Application Support/codex-plusplus/tweaks/project-home/mcp-server.js`
+   On Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/codex-plusplus/tweaks/project-home/mcp-server.js`
    Confirm the file exists with `ls -la` before continuing.
 
 2. Read `~/.codex/config.toml`. If a `[mcp_servers.project-home]` block already exists with the

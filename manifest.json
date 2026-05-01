@@ -1,12 +1,12 @@
 {
-  "id": "co.bennett.project-home",
+  "id": "project-home",
   "name": "Project Home",
-  "version": "1.0.0",
-  "githubRepo": "b-nnett/codex-plusplus-project-home",
-  "description": "Adds a Project Home kanban board with per-project Linear-style issues.",
+  "version": "999.0.0-local.1",
+  "githubRepo": "yaojinhui1993/codex-plusplus-project-home",
+  "description": "Local frozen Project Home kanban board with per-project Linear-style issues.",
   "author": {
-    "name": "bennett",
-    "url": "https://github.com/anomalyco/codex-plusplus"
+    "name": "yjh",
+    "url": "https://github.com/yaojinhui1993/codex-plusplus-project-home"
   },
   "tags": [
     "ui",
