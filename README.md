@@ -18,6 +18,7 @@ V1 includes a per-project kanban board for Linear-style issues:
 - Publishes a local project snapshot so Focus Composer can build `Session Resume Pack` handoffs
 - Project Brain stores per-project facts, decisions, commands, pitfalls, and session digests in the same local JSON DB
 - Auto Session Digest drafts an end-of-session memory from the active issue, open work, and git status
+- Project Command Center provides a project snapshot plus common local/Codex workflow actions
 - Issues are stored in a JSON DB keyed by project path
 
 The tweak also includes `mcp-server.js`, a stdio MCP server backed by the same issue store. Tools:
@@ -67,6 +68,22 @@ Project Brain is local-first. It is stored beside the issue board for the curren
 `Draft Digest` creates a reviewable session digest from reliable local context: project path, active issue, open issue counts, prioritized focus issues, and `git status --short` for the project folder. It does not scrape hidden Codex transcripts or invent work.
 
 Focus Composer can insert the current Brain Pack or latest digest after Project Home has published the project snapshot.
+
+## Project Command Center
+
+Open the Command Center button in the Project Home header, or use Global Quick Actions:
+
+- `Open Project Command Center`
+- `Copy Project Git Status`
+- `Open in GitHub Desktop`
+
+Command Center v1 is intentionally conservative. It reads project status and opens trusted local targets, but does not run arbitrary project commands. The panel includes:
+
+- Project snapshot: path, git branch, changed files, active issue, and open work count
+- Project actions: open folder, open in GitHub Desktop, copy path, copy git status, create backup, copy export JSON
+- Codex workflow: start work session, end session, open Project Brain, draft digest, copy/insert Brain Pack
+
+`Copy Project Git Status` uses `git status --short` and branch metadata from the project folder. If the folder is not a Git repository, the action still copies a useful project/path skeleton with a git note.
 
 ## Linear sync
 

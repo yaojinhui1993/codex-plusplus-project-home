@@ -100,6 +100,9 @@ test("buildProjectHomeQuickActions registers start and ship-note actions", () =>
   const actions = helpers.buildProjectHomeQuickActions({});
   assert.deepEqual(actions.map((action) => action.id), [
     "quick-capture",
+    "open-project-command-center",
+    "copy-project-git-status",
+    "open-github-desktop",
     "open-project-brain",
     "create-session-digest",
     "copy-project-brain-pack",
@@ -108,11 +111,14 @@ test("buildProjectHomeQuickActions registers start and ship-note actions", () =>
   ]);
   assert.equal(actions[0].source, "project-home");
   assert.equal(actions[0].title, "Quick Capture to Project Home");
-  assert.equal(actions[1].title, "Open Project Brain");
-  assert.equal(actions[2].title, "Create Session Digest");
-  assert.equal(actions[3].title, "Copy Project Brain Pack");
-  assert.equal(actions[4].title, "Start Work Session");
-  assert.equal(actions[5].title, "End Session / Ship Note");
+  assert.equal(actions[1].title, "Open Project Command Center");
+  assert.equal(actions[2].title, "Copy Project Git Status");
+  assert.equal(actions[3].title, "Open in GitHub Desktop");
+  assert.equal(actions[4].title, "Open Project Brain");
+  assert.equal(actions[5].title, "Create Session Digest");
+  assert.equal(actions[6].title, "Copy Project Brain Pack");
+  assert.equal(actions[7].title, "Start Work Session");
+  assert.equal(actions[8].title, "End Session / Ship Note");
   assert.equal(actions[0].isDisabled({}), true);
   assert.equal(actions[0].isDisabled({ project: { projectLabel: "sniper-system" } }), true);
   assert.equal(actions[0].isDisabled({ project: { projectPath: "/Users/yjh/Playground/sniper-system" } }), false);
@@ -121,14 +127,57 @@ test("buildProjectHomeQuickActions registers start and ship-note actions", () =>
   assert.equal(actions[3].isDisabled({}), true);
   assert.equal(actions[4].isDisabled({}), true);
   assert.equal(actions[5].isDisabled({}), true);
-  assert.equal(actions[4].isDisabled({ project: { projectLabel: "sniper-system" } }), false);
-  assert.equal(actions[5].isDisabled({ activeIssue: { issueId: "SNI-1" } }), false);
+  assert.equal(actions[6].isDisabled({}), true);
+  assert.equal(actions[7].isDisabled({ project: { projectLabel: "sniper-system" } }), false);
+  assert.equal(actions[8].isDisabled({ activeIssue: { issueId: "SNI-1" } }), false);
   assert.equal(typeof actions[0].run, "function");
   assert.equal(typeof actions[1].run, "function");
   assert.equal(typeof actions[2].run, "function");
   assert.equal(typeof actions[3].run, "function");
   assert.equal(typeof actions[4].run, "function");
   assert.equal(typeof actions[5].run, "function");
+  assert.equal(typeof actions[6].run, "function");
+  assert.equal(typeof actions[7].run, "function");
+  assert.equal(typeof actions[8].run, "function");
+});
+
+test("Project Command Center snapshot summarizes git and project state", () => {
+  const helpers = projectHome.__test || {};
+  assert.equal(typeof helpers.buildProjectCommandSnapshot, "function");
+  assert.equal(typeof helpers.formatProjectGitStatus, "function");
+
+  const snapshot = helpers.buildProjectCommandSnapshot({
+    current: {
+      label: "sniper-system",
+      path: "/Users/yjh/Playground/sniper-system",
+    },
+    board: {
+      settings: { activeIssueId: "SNI-1" },
+      issues: [
+        { id: "SNI-1", title: "Ship command center", status: "in_progress", priority: "high" },
+        { id: "SNI-2", title: "Done", status: "done", priority: "none" },
+        { id: "SNI-3", title: "Review", status: "in_review", priority: "medium" },
+      ],
+    },
+    gitStatus: {
+      isRepo: true,
+      branch: "main",
+      root: "/Users/yjh/Playground/sniper-system",
+      changedFiles: ["M index.js", "?? tests/command-center.test.js"],
+    },
+  });
+
+  assert.equal(snapshot.projectLabel, "sniper-system");
+  assert.equal(snapshot.branch, "main");
+  assert.equal(snapshot.dirtyCount, 2);
+  assert.deepEqual(snapshot.openCounts, { in_progress: 1, in_review: 1 });
+  assert.equal(snapshot.activeIssue.issueId, "SNI-1");
+
+  const formatted = helpers.formatProjectGitStatus(snapshot);
+  assert.match(formatted, /^Project Git Status/);
+  assert.match(formatted, /Branch: main/);
+  assert.match(formatted, /M index\.js/);
+  assert.match(formatted, /\?\? tests\/command-center\.test\.js/);
 });
 
 test("Project Brain snapshots format local memory and latest digest", () => {

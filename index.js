@@ -58,6 +58,8 @@ const IPC_BACKUP_RESTORE = "project-home:backup:restore";
 const IPC_BRAIN_UPDATE = "project-home:brain:update";
 const IPC_DIGEST_DRAFT = "project-home:digest:draft";
 const IPC_DIGEST_CREATE = "project-home:digest:create";
+const IPC_GIT_STATUS = "project-home:git:status";
+const IPC_OPEN_GITHUB_DESKTOP = "project-home:github-desktop:open";
 const LINEAR_API_SETTINGS_URL = "https://linear.app/settings/api";
 
 const ISSUE_COLUMNS = [
@@ -171,6 +173,8 @@ function startMain(self, api) {
       removeMainHandler(api, IPC_BRAIN_UPDATE);
       removeMainHandler(api, IPC_DIGEST_DRAFT);
       removeMainHandler(api, IPC_DIGEST_CREATE);
+      removeMainHandler(api, IPC_GIT_STATUS);
+      removeMainHandler(api, IPC_OPEN_GITHUB_DESKTOP);
     },
   };
   self._state = state;
@@ -227,6 +231,10 @@ function startMain(self, api) {
     store.buildSessionDigestDraft(requireProjectPath(payload), payload || {}));
   replaceMainHandler(api, IPC_DIGEST_CREATE, (payload) =>
     store.createSessionDigest(requireProjectPath(payload), payload || {}));
+  replaceMainHandler(api, IPC_GIT_STATUS, (payload) =>
+    readProjectGitStatus(requireProjectPath(payload)));
+  replaceMainHandler(api, IPC_OPEN_GITHUB_DESKTOP, (payload) =>
+    openProjectInGitHubDesktop(requireProjectPath(payload)));
 
   api.log.info("[project-home] main issue store active", { root: store.root });
 }
@@ -253,6 +261,51 @@ function requireIssueId(payload) {
   const id = String(payload?.issueId || "").trim();
   if (!id) throw new Error("issueId is required");
   return id;
+}
+
+function readProjectGitStatus(projectPath) {
+  const cwd = String(projectPath || "").trim();
+  const runGit = (args) => {
+    const { execFileSync } = require("node:child_process");
+    return execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      timeout: 2500,
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  };
+  try {
+    const root = runGit(["rev-parse", "--show-toplevel"]);
+    const branch = runGit(["branch", "--show-current"]) || runGit(["rev-parse", "--short", "HEAD"]);
+    const status = runGit(["status", "--short"]);
+    return {
+      isRepo: true,
+      root,
+      branch,
+      changedFiles: status.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 80),
+      error: "",
+    };
+  } catch (error) {
+    return {
+      isRepo: false,
+      root: "",
+      branch: "",
+      changedFiles: [],
+      error: error?.message || "Not a git repository",
+    };
+  }
+}
+
+function openProjectInGitHubDesktop(projectPath) {
+  return new Promise((resolve, reject) => {
+    const { execFile } = require("node:child_process");
+    execFile("open", ["-a", "GitHub Desktop", projectPath], { timeout: 5000 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(String(stderr || error.message || "Could not open GitHub Desktop").trim()));
+        return;
+      }
+      resolve({ ok: true });
+    });
+  });
 }
 
 async function listLinearTeams(apiKey, apiUrl) {
@@ -593,6 +646,10 @@ function startRenderer(self, api) {
     brainSheetOpen: false,
     brainDraft: null,
     brainSaveStatus: "idle",
+    commandCenterOpen: false,
+    commandSnapshot: null,
+    commandSnapshotLoading: false,
+    commandSnapshotError: "",
     quickCapture: null,
     editor: null,
     view: null,
@@ -1824,8 +1881,158 @@ function installStyle() {
       color: var(--color-token-description-foreground, currentColor);
     }
 
+    [${VIEW_ATTR}="editor-panel"][data-command-panel] {
+      width: min(980px, calc(100vw - 48px));
+      max-height: min(86vh, 820px);
+    }
+
+    [data-command-body] {
+      gap: 16px !important;
+    }
+
+    [data-command-section] {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    [data-command-title] {
+      margin: 0;
+      font-size: 12px;
+      font-weight: 650;
+      color: var(--color-token-text-primary, currentColor);
+    }
+
+    [data-command-grid] {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    [data-command-metric] {
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid var(--color-token-border-light, rgba(127,127,127,.16));
+      border-radius: 8px;
+      background: var(--color-token-main-surface-secondary, rgba(127,127,127,.05));
+    }
+
+    [data-command-metric] strong {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 17px;
+      line-height: 22px;
+      color: var(--color-token-text-primary, currentColor);
+    }
+
+    [data-command-metric] span,
+    [data-command-detail] span {
+      display: block;
+      font-size: 11px;
+      color: var(--color-token-description-foreground, currentColor);
+    }
+
+    [data-command-details] {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    [data-command-detail] {
+      display: grid;
+      grid-template-columns: 86px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+      font-size: 12px;
+    }
+
+    [data-command-detail] code {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--color-token-text-primary, currentColor);
+      font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+    }
+
+    [data-command-files] {
+      max-height: 150px;
+      overflow: auto;
+      margin: 0;
+      padding: 10px;
+      border: 1px solid var(--color-token-border-light, rgba(127,127,127,.16));
+      border-radius: 8px;
+      background: var(--color-token-main-surface-secondary, rgba(127,127,127,.05));
+      color: var(--color-token-text-primary, currentColor);
+      font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+
+    [data-command-action-grid] {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    [data-command-action] {
+      display: flex;
+      min-width: 0;
+      align-items: flex-start;
+      gap: 10px;
+      min-height: 66px;
+      padding: 10px;
+      border: 1px solid var(--color-token-border-light, rgba(127,127,127,.18));
+      border-radius: 8px;
+      background: transparent;
+      color: var(--color-token-text-primary, currentColor);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    [data-command-action]:hover,
+    [data-command-action]:focus-visible {
+      outline: none;
+      background: var(--color-token-list-hover-background, rgba(127,127,127,.08));
+      border-color: var(--color-token-border, rgba(127,127,127,.28));
+    }
+
+    [data-command-action] > svg {
+      margin-top: 2px;
+      color: var(--color-token-description-foreground, currentColor);
+    }
+
+    [data-command-action-copy] {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    [data-command-action-copy] strong {
+      font-size: 13px;
+      line-height: 17px;
+    }
+
+    [data-command-action-copy] span {
+      font-size: 11px;
+      line-height: 15px;
+      color: var(--color-token-description-foreground, currentColor);
+    }
+
     @media (max-width: 760px) {
       [data-brain-grid] {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      [data-command-grid],
+      [data-command-action-grid] {
         grid-template-columns: minmax(0, 1fr);
       }
     }
@@ -2329,6 +2536,7 @@ function renderProjectHomeView(state) {
     if (state.editor) contentBlock.append(renderIssueEditor(state));
     if (state.settingsSheetOpen) contentBlock.append(renderProjectHomeSettingsSheet(state));
     if (state.brainSheetOpen) contentBlock.append(renderProjectBrainSheet(state));
+    if (state.commandCenterOpen) contentBlock.append(renderProjectCommandCenterSheet(state));
   } catch (error) {
     state.boardError = error?.message || String(error);
     contentBlock.replaceChildren(renderProjectHomeError(state.boardError));
@@ -2670,6 +2878,283 @@ function insertProjectBrainPack(state, patch = null) {
       requestedAt: new Date().toISOString(),
     },
   }));
+}
+
+function openProjectCommandCenterSheet(state) {
+  state.commandCenterOpen = true;
+  state.commandSnapshotError = "";
+  void loadProjectCommandSnapshot(state);
+  renderProjectHomeView(state);
+}
+
+function closeProjectCommandCenterSheet(state) {
+  state.commandCenterOpen = false;
+  state.commandSnapshotError = "";
+  renderProjectHomeView(state);
+}
+
+async function loadProjectCommandSnapshot(state) {
+  if (!state.current?.path) return null;
+  state.commandSnapshotLoading = true;
+  if (state.commandCenterOpen) renderProjectHomeView(state);
+  try {
+    const gitStatus = await state.api.ipc.invoke(IPC_GIT_STATUS, { projectPath: state.current.path });
+    const snapshot = buildProjectCommandSnapshot({
+      current: state.current,
+      board: state.board,
+      gitStatus,
+    });
+    state.commandSnapshot = snapshot;
+    state.commandSnapshotError = gitStatus?.error || "";
+    return snapshot;
+  } catch (error) {
+    state.commandSnapshot = buildProjectCommandSnapshot({
+      current: state.current,
+      board: state.board,
+      gitStatus: { isRepo: false, error: error?.message || String(error) },
+    });
+    state.commandSnapshotError = error?.message || String(error);
+    return state.commandSnapshot;
+  } finally {
+    state.commandSnapshotLoading = false;
+    if (state.commandCenterOpen) renderProjectHomeView(state);
+  }
+}
+
+function renderProjectCommandCenterSheet(state) {
+  const backdrop = document.createElement("div");
+  backdrop.setAttribute(VIEW_ATTR, "editor-backdrop");
+  backdrop.addEventListener("pointerdown", (event) => {
+    if (event.target === backdrop) closeProjectCommandCenterSheet(state);
+  });
+
+  const panel = document.createElement("div");
+  panel.setAttribute(VIEW_ATTR, "editor-panel");
+  panel.setAttribute("data-command-panel", "");
+  panel.setAttribute("aria-label", "Project Command Center");
+  panel.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+  const head = document.createElement("div");
+  head.setAttribute("data-editor-head", "");
+  const crumb = document.createElement("div");
+  crumb.setAttribute("data-editor-crumb", "");
+  crumb.textContent = "Project Command Center";
+  const meta = pageEl("div", "ml-auto text-xs text-token-text-secondary");
+  meta.textContent = state.commandSnapshotLoading ? "Refreshing..." : basenameFor(state.current?.path, state.current?.label || "Project");
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "flex size-7 items-center justify-center rounded-md text-token-description-foreground hover:bg-token-list-hover-background hover:text-token-foreground";
+  close.setAttribute("aria-label", "Close Project Command Center");
+  close.innerHTML = xIconSvg();
+  close.addEventListener("click", () => closeProjectCommandCenterSheet(state));
+  head.append(crumb, meta, close);
+
+  const snapshot = state.commandSnapshot || buildProjectCommandSnapshot({
+    current: state.current,
+    board: state.board,
+    gitStatus: {},
+  });
+
+  const body = document.createElement("div");
+  body.setAttribute("data-editor-body", "");
+  body.setAttribute("data-command-body", "");
+  body.append(
+    renderCommandSnapshotSection(snapshot, state.commandSnapshotError),
+    renderCommandActionsSection(state, snapshot),
+    renderCommandWorkflowSection(state),
+  );
+
+  const foot = document.createElement("div");
+  foot.setAttribute("data-editor-foot", "");
+  const status = document.createElement("div");
+  status.setAttribute("data-editor-hint", "");
+  status.textContent = snapshot.isGitRepo
+    ? `${snapshot.dirtyCount} changed file${snapshot.dirtyCount === 1 ? "" : "s"} on ${snapshot.branch || "unknown branch"}.`
+    : "Git metadata unavailable for this project.";
+  const actions = document.createElement("div");
+  actions.setAttribute("data-command-actions", "");
+  const refresh = pageButton(state.commandSnapshotLoading ? "Refreshing..." : "Refresh", "secondary");
+  refresh.disabled = state.commandSnapshotLoading;
+  refresh.addEventListener("click", () => void loadProjectCommandSnapshot(state));
+  const copy = pageButton("Copy Git Status", "secondary");
+  copy.addEventListener("click", () => void copyProjectGitStatus(state));
+  actions.append(refresh, copy);
+  foot.append(status, actions);
+
+  panel.append(head, body, foot);
+  backdrop.append(panel);
+  return backdrop;
+}
+
+function renderCommandSnapshotSection(snapshot, error = "") {
+  const section = document.createElement("section");
+  section.setAttribute("data-command-section", "");
+  const title = commandSectionTitle("Project Snapshot");
+  const grid = document.createElement("div");
+  grid.setAttribute("data-command-grid", "");
+  grid.append(
+    commandMetric("Branch", snapshot.branch || "-"),
+    commandMetric("Changed", String(snapshot.dirtyCount)),
+    commandMetric("Active", snapshot.activeIssue?.issueId || "-"),
+    commandMetric("Open", String(Object.values(snapshot.openCounts || {}).reduce((sum, count) => sum + count, 0))),
+  );
+
+  const details = document.createElement("div");
+  details.setAttribute("data-command-details", "");
+  details.append(
+    commandDetail("Project", snapshot.projectLabel || "-"),
+    commandDetail("Path", snapshot.projectPath || "-"),
+    commandDetail("Git root", snapshot.gitRoot || "-"),
+  );
+  if (error) details.append(commandDetail("Git note", error));
+
+  const changed = document.createElement("pre");
+  changed.setAttribute("data-command-files", "");
+  changed.textContent = snapshot.changedFiles.length ? snapshot.changedFiles.join("\n") : "No changed files";
+  section.append(title, grid, details, changed);
+  return section;
+}
+
+function renderCommandActionsSection(state, snapshot) {
+  const section = document.createElement("section");
+  section.setAttribute("data-command-section", "");
+  section.append(commandSectionTitle("Project Actions"));
+  const actions = document.createElement("div");
+  actions.setAttribute("data-command-action-grid", "");
+  actions.append(
+    commandCenterActionButton("Open Folder", "Open this project in Finder.", folderIconSvg(), () => {
+      void state.api.ipc.invoke(IPC_OPEN_PROJECT_FOLDER, { projectPath: snapshot.projectPath });
+    }),
+    commandCenterActionButton("GitHub Desktop", "Open this repository in GitHub Desktop.", githubDesktopIconSvg(), () => {
+      void openCurrentProjectInGitHubDesktop(state);
+    }),
+    commandCenterActionButton("Copy Path", "Copy the absolute project path.", copyIconSvg(), () => {
+      void copyToClipboard(snapshot.projectPath || "");
+    }),
+    commandCenterActionButton("Copy Git Status", "Copy branch and changed files.", copyIconSvg(), () => {
+      void copyProjectGitStatus(state);
+    }),
+    commandCenterActionButton("Create Backup", "Save a local Project Home backup.", hardDriveIconSvg(), () => {
+      void createLocalBackup(state);
+    }),
+    commandCenterActionButton("Copy Export JSON", "Copy board, brain, and issues as JSON.", copyIconSvg(), () => {
+      void copyProjectExportJson(state);
+    }),
+  );
+  section.append(actions);
+  return section;
+}
+
+function renderCommandWorkflowSection(state) {
+  const section = document.createElement("section");
+  section.setAttribute("data-command-section", "");
+  section.append(commandSectionTitle("Codex Workflow"));
+  const actions = document.createElement("div");
+  actions.setAttribute("data-command-action-grid", "");
+  actions.append(
+    commandCenterActionButton("Start Work Session", "Launch Focus Composer with the resume pack.", playIconSvg(), () => {
+      state.commandCenterOpen = false;
+      startWorkSession(state);
+    }),
+    commandCenterActionButton("End Session", "Draft a ship note in Focus Composer.", circleCheckIconSvg(), () => {
+      state.commandCenterOpen = false;
+      startShipNoteSession(state);
+    }),
+    commandCenterActionButton("Open Brain", "Edit local project memory.", brainIconSvg(), () => {
+      state.commandCenterOpen = false;
+      openProjectBrainSheet(state);
+    }),
+    commandCenterActionButton("Draft Digest", "Create a reviewable session digest.", commandIconSvg(), () => {
+      state.commandCenterOpen = false;
+      openProjectBrainSheet(state, { digest: true });
+    }),
+    commandCenterActionButton("Copy Brain Pack", "Copy local project memory.", copyIconSvg(), () => {
+      void copyProjectBrainPack(state);
+    }),
+    commandCenterActionButton("Insert Brain Pack", "Open Focus Composer with project memory.", messageIconSvg(), () => {
+      state.commandCenterOpen = false;
+      insertProjectBrainPack(state);
+    }),
+  );
+  section.append(actions);
+  return section;
+}
+
+function commandSectionTitle(text) {
+  const title = document.createElement("h2");
+  title.setAttribute("data-command-title", "");
+  title.textContent = text;
+  return title;
+}
+
+function commandMetric(label, value) {
+  const item = document.createElement("div");
+  item.setAttribute("data-command-metric", "");
+  const number = document.createElement("strong");
+  number.textContent = value;
+  const text = document.createElement("span");
+  text.textContent = label;
+  item.append(number, text);
+  return item;
+}
+
+function commandDetail(label, value) {
+  const row = document.createElement("div");
+  row.setAttribute("data-command-detail", "");
+  const key = document.createElement("span");
+  key.textContent = label;
+  const val = document.createElement("code");
+  val.textContent = value;
+  row.append(key, val);
+  return row;
+}
+
+function commandCenterActionButton(title, description, icon, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.setAttribute("data-command-action", "");
+  button.innerHTML = icon;
+  const copy = document.createElement("span");
+  copy.setAttribute("data-command-action-copy", "");
+  const label = document.createElement("strong");
+  label.textContent = title;
+  const desc = document.createElement("span");
+  desc.textContent = description;
+  copy.append(label, desc);
+  button.append(copy);
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onClick(event);
+  });
+  return button;
+}
+
+async function copyProjectGitStatus(state) {
+  const snapshot = await ensureProjectCommandSnapshot(state);
+  const copied = await copyToClipboard(formatProjectGitStatus(snapshot));
+  if (!copied) window.alert("Could not copy project git status.");
+}
+
+async function ensureProjectCommandSnapshot(state) {
+  if (state.commandSnapshot?.projectPath === state.current?.path && !state.commandSnapshotLoading) {
+    return state.commandSnapshot;
+  }
+  return await loadProjectCommandSnapshot(state) || buildProjectCommandSnapshot({
+    current: state.current,
+    board: state.board,
+    gitStatus: {},
+  });
+}
+
+async function openCurrentProjectInGitHubDesktop(state) {
+  const projectPath = state.current?.path || "";
+  if (!projectPath) return;
+  try {
+    await state.api.ipc.invoke(IPC_OPEN_GITHUB_DESKTOP, { projectPath });
+  } catch (error) {
+    window.alert(`Could not open GitHub Desktop:\n${error?.message || String(error)}`);
+  }
 }
 
 function renderProjectHomeSettingsPage(root, state) {
@@ -4298,6 +4783,39 @@ function buildProjectHomeQuickActions(state = {}) {
     },
     {
       source: QUICK_ACTIONS_SOURCE,
+      id: "open-project-command-center",
+      title: "Open Project Command Center",
+      subtitle: "Open project status, local actions, and Codex workflow controls.",
+      keywords: ["project home", "command center", "commands", "git", "workflow"],
+      shortcut: "Command",
+      disabledReason: "No open Project Home project",
+      isDisabled: () => !state?.current?.path || !state?.board,
+      run: (context) => runProjectHomeQuickAction(state, "open-command-center", context),
+    },
+    {
+      source: QUICK_ACTIONS_SOURCE,
+      id: "copy-project-git-status",
+      title: "Copy Project Git Status",
+      subtitle: "Copy branch and changed files for the open project.",
+      keywords: ["project home", "git", "status", "copy", "changed files"],
+      shortcut: "Git",
+      disabledReason: "No open Project Home project",
+      isDisabled: () => !state?.current?.path || !state?.board,
+      run: (context) => runProjectHomeQuickAction(state, "copy-git-status", context),
+    },
+    {
+      source: QUICK_ACTIONS_SOURCE,
+      id: "open-github-desktop",
+      title: "Open in GitHub Desktop",
+      subtitle: "Open the current project folder in GitHub Desktop.",
+      keywords: ["project home", "github desktop", "git", "open"],
+      shortcut: "GitHub",
+      disabledReason: "No open Project Home project",
+      isDisabled: () => !state?.current?.path || !state?.board,
+      run: (context) => runProjectHomeQuickAction(state, "open-github-desktop", context),
+    },
+    {
+      source: QUICK_ACTIONS_SOURCE,
       id: "open-project-brain",
       title: "Open Project Brain",
       subtitle: "Edit local facts, decisions, commands, pitfalls, and session digests.",
@@ -4519,6 +5037,19 @@ function runProjectHomeQuickAction(state, kind, context = {}) {
     openQuickCaptureDialog(state, context);
     return;
   }
+  if (kind === "open-command-center" || kind === "copy-git-status" || kind === "open-github-desktop") {
+    if (!state?.current || !state?.board) return;
+    if (kind === "copy-git-status") {
+      void copyProjectGitStatus(state);
+      return;
+    }
+    if (kind === "open-github-desktop") {
+      void openCurrentProjectInGitHubDesktop(state);
+      return;
+    }
+    openProjectCommandCenterSheet(state);
+    return;
+  }
   if (kind === "open-brain" || kind === "create-digest" || kind === "copy-brain-pack") {
     if (!state?.current || !state?.board) return;
     if (kind === "copy-brain-pack") {
@@ -4641,6 +5172,73 @@ function buildProjectBrainSnapshot(state) {
     latestDigest: brain.digests[0] || null,
     updatedAt: new Date().toISOString(),
   };
+}
+
+function buildProjectCommandSnapshot(input = {}) {
+  const current = input.current || {};
+  const board = input.board || {};
+  const gitStatus = input.gitStatus || {};
+  const issues = Array.isArray(board.issues) ? board.issues : [];
+  const activeId = String(board.settings?.activeIssueId || "").trim();
+  const activeIssue = issueResumeItem(issues.find((issue) => issue.id === activeId)) || {
+    id: "",
+    issueId: "",
+    title: "",
+    status: "",
+    priority: "none",
+    labels: [],
+    assignee: "",
+    dueDate: "",
+    updatedAt: "",
+  };
+  const openCounts = {};
+  for (const issue of issues) {
+    if (isDoneStatus(issue.status)) continue;
+    const status = String(issue.status || "backlog").trim() || "backlog";
+    openCounts[status] = (openCounts[status] || 0) + 1;
+  }
+  const changedFiles = Array.isArray(gitStatus.changedFiles)
+    ? gitStatus.changedFiles.map((line) => String(line || "").trim()).filter(Boolean).slice(0, 80)
+    : [];
+  return {
+    version: 1,
+    source: "project-home",
+    projectPath: String(current.path || board.projectPath || "").trim(),
+    projectLabel: String(current.label || basenameFor(current.path || board.projectPath, "Project")).trim(),
+    isGitRepo: Boolean(gitStatus.isRepo),
+    gitRoot: String(gitStatus.root || "").trim(),
+    branch: String(gitStatus.branch || "").trim(),
+    dirtyCount: changedFiles.length,
+    changedFiles,
+    gitError: String(gitStatus.error || "").trim(),
+    activeIssue,
+    openCounts,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function formatProjectGitStatus(input = {}) {
+  const snapshot = input.changedFiles ? input : buildProjectCommandSnapshot(input);
+  const lines = [
+    "Project Git Status",
+    "",
+    `Project: ${snapshot.projectLabel || "-"}`,
+    `Path: ${snapshot.projectPath || "-"}`,
+    `Repository: ${snapshot.gitRoot || "-"}`,
+    `Branch: ${snapshot.branch || "-"}`,
+    `Changed files: ${snapshot.dirtyCount || 0}`,
+  ];
+  if (snapshot.gitError) lines.push(`Git note: ${snapshot.gitError}`);
+  lines.push("", "Files:");
+  if (snapshot.changedFiles?.length) {
+    for (const file of snapshot.changedFiles) lines.push(`- ${file}`);
+  } else {
+    lines.push("-");
+  }
+  if (snapshot.activeIssue?.issueId) {
+    lines.push("", `Active Issue: ${snapshot.activeIssue.issueId} ${snapshot.activeIssue.title || ""}`.trim());
+  }
+  return lines.join("\n");
 }
 
 function projectBrainHasContent(brain = {}) {
@@ -5821,6 +6419,7 @@ function applyQuickCaptureResult(state, target, result) {
   state.board = normalizeBoard(board);
   syncSharedActiveIssue(state);
   syncSharedResumePack(state);
+  syncSharedProjectBrain(state);
   state.headerSignature = "";
   state.boardError = "";
   renderProjectHomeView(state);
@@ -5912,6 +6511,8 @@ function closeProjectHome(state, options = {}) {
   state.editor = null;
   state.brainSheetOpen = false;
   state.brainDraft = null;
+  state.commandCenterOpen = false;
+  state.commandSnapshot = null;
   syncProjectHomeSidebarState(state);
   if (options.updateHistory) removeProjectHomeHash();
 }
@@ -5936,6 +6537,8 @@ function dismissProjectHomeForNativeNavigation(state, navTarget, options = {}) {
   state.editor = null;
   state.brainSheetOpen = false;
   state.brainDraft = null;
+  state.commandCenterOpen = false;
+  state.commandSnapshot = null;
   closeProjectHomeContextMenu(state);
   syncProjectHomeSidebarState(state);
   const root = state.view;
@@ -5978,6 +6581,7 @@ function handleRouteChange(state) {
     if (changed) {
       state.board = null;
       state.boardError = "";
+      state.commandSnapshot = null;
     }
     renderProjectHomeView(state);
     if (changed || !state.board) loadProjectHomeBoard(state, routeProject);
@@ -6296,6 +6900,7 @@ function renderProjectHomeHeader(state, node) {
     renderQuickCaptureButton(state),
     renderStartWorkButton(state),
     renderEndSessionButton(state),
+    renderProjectCommandCenterButton(state),
     renderProjectBrainButton(state),
     renderIssueSearch(state),
     renderViewModeToggle(state),
@@ -6322,6 +6927,12 @@ function renderStartWorkButton(state) {
 function renderEndSessionButton(state) {
   return headerIconButton("End session / ship note", circleCheckIconSvg(), () => {
     startShipNoteSession(state);
+  });
+}
+
+function renderProjectCommandCenterButton(state) {
+  return headerIconButton("Project Command Center", commandIconSvg(), () => {
+    openProjectCommandCenterSheet(state);
   });
 }
 
@@ -7332,6 +7943,17 @@ function plusSquareIconSvg() {
   return iconSvg('<rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M12 8v8"></path><path d="M8 12h8"></path>');
 }
 
+function commandIconSvg() {
+  return iconSvg('<path d="M4 17l6-6-6-6"></path><path d="M12 19h8"></path>');
+}
+
+function githubDesktopIconSvg() {
+  return iconSvg(
+    '<path d="M9 19c-4 1.5-4-2-5-2.5"></path>' +
+      '<path d="M15 22v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 19 4.77 5.07 5.07 0 0 0 18.91 1S17.73.65 15 2.48a13.38 13.38 0 0 0-7 0C5.27.65 4.09 1 4.09 1A5.07 5.07 0 0 0 4 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 8 18.13V22"></path>',
+  );
+}
+
 function brainIconSvg() {
   return iconSvg(
     '<path d="M9 3a3 3 0 0 0-3 3v1.2A3 3 0 0 0 4 10v1a3 3 0 0 0 2 2.83V18a3 3 0 0 0 5 2.24V3.76A2.99 2.99 0 0 0 9 3Z"></path>' +
@@ -7383,6 +8005,8 @@ module.exports.__test = {
   buildProjectBrainSnapshot,
   formatProjectBrainPack,
   normalizeProjectBrain,
+  buildProjectCommandSnapshot,
+  formatProjectGitStatus,
   buildProjectHomeQuickActions,
   buildQuickCaptureIssueInput,
   buildProjectHomeKeyboardShortcuts,
