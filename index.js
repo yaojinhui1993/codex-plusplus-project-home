@@ -30,6 +30,7 @@ const ACTIVE_ISSUE_STORAGE_KEY = "codexpp.project-home.activeIssue.v1";
 const ACTIVE_ISSUE_CHANGED_EVENT = "codexpp-project-home-active-issue-changed";
 const RESUME_PACK_STORAGE_KEY = "codexpp.project-home.resumePack.v1";
 const RESUME_PACK_CHANGED_EVENT = "codexpp-project-home-resume-pack-changed";
+const FOCUS_COMPOSER_LAUNCH_EVENT = "codexpp-focus-composer-launch";
 
 const IPC_BOARD_LIST = "project-home:issues:list";
 const IPC_ISSUE_CREATE = "project-home:issue:create";
@@ -3709,6 +3710,33 @@ function syncSharedResumePack(state) {
   }
 }
 
+function startWorkSession(state) {
+  syncSharedActiveIssue(state);
+  syncSharedResumePack(state);
+  const payload = buildWorkSessionLaunchPayload(state);
+  try {
+    window.dispatchEvent(new CustomEvent(FOCUS_COMPOSER_LAUNCH_EVENT, { detail: payload }));
+    state.api.log.info("[project-home] work session launch requested", {
+      projectPath: payload?.project?.projectPath || "",
+      activeIssueId: payload?.activeIssue?.issueId || "",
+    });
+  } catch (error) {
+    state.api.log.warn("[project-home] work session launch failed", { error: error?.message || String(error) });
+  }
+}
+
+function buildWorkSessionLaunchPayload(state) {
+  const project = buildResumeSnapshot(state);
+  return {
+    version: 1,
+    source: "project-home",
+    kind: "work-session",
+    project,
+    activeIssue: activeIssueBridgePayload(state),
+    requestedAt: new Date().toISOString(),
+  };
+}
+
 function activeIssueBridgePayload(state) {
   const issue = activeIssueForState(state);
   if (!issue) return null;
@@ -5139,6 +5167,7 @@ function renderProjectHomeHeader(state, node) {
   controls.className = "flex shrink-0 items-center gap-2";
   controls.style.webkitAppRegion = "no-drag";
   controls.append(
+    renderStartWorkButton(state),
     renderIssueSearch(state),
     renderViewModeToggle(state),
     renderColumnMenuButton(state),
@@ -5147,6 +5176,12 @@ function renderProjectHomeHeader(state, node) {
   );
 
   node.append(identity, controls);
+}
+
+function renderStartWorkButton(state) {
+  return headerIconButton("Start work session", playIconSvg(), () => {
+    startWorkSession(state);
+  });
 }
 
 function renderActiveIssueHeaderChip(state, issue) {
@@ -6137,6 +6172,10 @@ function listIconSvg() {
   );
 }
 
+function playIconSvg() {
+  return iconSvg('<polygon points="6 3 20 12 6 21 6 3"></polygon>');
+}
+
 function settingsIconSvg() {
   return iconSvg(
     '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.52a2 2 0 0 1-1 1.72l-.15.1a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.52a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>' +
@@ -6175,6 +6214,7 @@ function iconSvg(paths) {
 
 module.exports.__test = {
   buildResumeSnapshot,
+  buildWorkSessionLaunchPayload,
   headerControlInteractionStyle,
   isNativeSidebarToggleLabel,
 };

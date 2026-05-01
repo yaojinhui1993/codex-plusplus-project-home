@@ -39,6 +39,34 @@ test("buildResumeSnapshot summarizes open work and prioritizes focus issues", ()
   assert.equal(snapshot.activeIssue.issueId, "SNI-1");
 });
 
+test("buildWorkSessionLaunchPayload bridges the current session into Focus Composer", () => {
+  const helpers = projectHome.__test || {};
+  assert.equal(typeof helpers.buildWorkSessionLaunchPayload, "function");
+
+  const payload = helpers.buildWorkSessionLaunchPayload({
+    current: {
+      label: "sniper-system",
+      path: "/Users/yjh/Playground/sniper-system",
+    },
+    board: {
+      settings: { activeIssueId: "SNI-1" },
+      issues: [
+        { id: "SNI-1", title: "Fix regression colors", status: "in_progress", priority: "high", rank: 2 },
+        { id: "SNI-2", title: "Done item", status: "done", priority: "urgent", rank: 0 },
+        { id: "SNI-5", title: "Add Opinion Source AI chat", status: "todo", priority: "urgent", rank: 0 },
+      ],
+    },
+  });
+
+  assert.equal(payload.kind, "work-session");
+  assert.equal(payload.source, "project-home");
+  assert.equal(payload.project.projectLabel, "sniper-system");
+  assert.equal(payload.project.projectPath, "/Users/yjh/Playground/sniper-system");
+  assert.equal(payload.activeIssue.issueId, "SNI-1");
+  assert.deepEqual(payload.project.focusIssues.map((issue) => issue.id), ["SNI-5", "SNI-1"]);
+  assert.match(payload.requestedAt, /^\d{4}-\d{2}-\d{2}T/);
+});
+
 test("header icon controls opt out of Electron drag regions", () => {
   const helpers = projectHome.__test || {};
   assert.equal(typeof helpers.headerControlInteractionStyle, "function");
