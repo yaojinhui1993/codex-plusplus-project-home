@@ -49,3 +49,12 @@ test("header icon controls opt out of Electron drag regions", () => {
     zIndex: "20",
   });
 });
+
+test("native sidebar toggle labels are protected while Project Home is open", () => {
+  const helpers = projectHome.__test || {};
+  assert.equal(typeof helpers.isNativeSidebarToggleLabel, "function");
+
+  assert.equal(helpers.isNativeSidebarToggleLabel("Hide sidebar"), true);
+  assert.equal(helpers.isNativeSidebarToggleLabel("Show sidebar"), true);
+  assert.equal(helpers.isNativeSidebarToggleLabel("Project Home settings"), false);
+});

@@ -564,6 +564,7 @@ function startRenderer(self, api) {
     hiddenHeaderNodes: [],
     headerNode: null,
     headerSignature: "",
+    forwardingSidebarToggle: false,
     renderToken: 0,
     ignoreRouteUntil: 0,
     applyTimer: null,
@@ -623,6 +624,15 @@ function startRenderer(self, api) {
     stopProjectHomeEvent(event);
   };
   state.onClick = (event) => {
+    if (state.view && !state.forwardingSidebarToggle) {
+      const sidebarToggle = closestNativeSidebarToggleButton(event.target);
+      if (sidebarToggle) {
+        stopProjectHomeEvent(event);
+        activateSidebarToggleForProjectHome(state, sidebarToggle);
+        return;
+      }
+    }
+
     if (closestIssueSearch(event.target)) {
       state.onSearchClick(event);
       return;
@@ -654,17 +664,8 @@ function startRenderer(self, api) {
     if (state.view && isSidebarToggleShortcut(event)) {
       const target = findSidebarToggleButton();
       if (!target) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (typeof event.stopImmediatePropagation === "function") {
-        event.stopImmediatePropagation();
-      }
-      state.ignoreRouteUntil = Date.now() + 1200;
-      activateNavigationTarget(target);
-      window.setTimeout(() => {
-        if (!state.current || !state.view || readProjectHomeFromUrl()) return;
-        replaceProjectHomeUrl(state.current.path, state.current.label);
-      }, 0);
+      stopProjectHomeEvent(event);
+      activateSidebarToggleForProjectHome(state, target);
       return;
     }
 
@@ -5030,6 +5031,12 @@ function projectHomeHeaderContent(header) {
   const children = Array.from(header.children)
     .filter((child) => child instanceof HTMLElement);
   return children.find((child) => {
+    if (
+      child.getAttribute(HEADER_ATTR) === "root" ||
+      child.querySelector?.(`[${HEADER_ATTR}="root"]`)
+    ) {
+      return false;
+    }
     const className = String(child.className || "");
     return /\bflex-1\b/.test(className) && /\bitems-center\b/.test(className);
   }) || null;
@@ -5596,9 +5603,49 @@ function findSidebarToggleButton() {
   const buttons = Array.from(header.querySelectorAll("button"))
     .filter((button) => button instanceof HTMLButtonElement && visible(button));
   return buttons.find((button) => {
-    const label = normalize(button.getAttribute("aria-label") || button.title || displayLabelFor(button));
-    return label === "hide sidebar" || label === "show sidebar";
+    return isNativeSidebarToggleLabel(sidebarToggleLabelFor(button));
   }) || null;
+}
+
+function closestNativeSidebarToggleButton(target) {
+  if (!(target instanceof Element)) return null;
+  const button = target.closest("button");
+  if (!(button instanceof HTMLButtonElement)) return null;
+  if (button.closest(`[${HEADER_ATTR}="root"]`)) return null;
+  return isNativeSidebarToggleLabel(sidebarToggleLabelFor(button)) ? button : null;
+}
+
+function sidebarToggleLabelFor(button) {
+  return button?.getAttribute?.("aria-label") || button?.title || displayLabelFor(button);
+}
+
+function isNativeSidebarToggleLabel(label) {
+  const value = normalize(label);
+  return value === "hide sidebar" || value === "show sidebar";
+}
+
+function activateSidebarToggleForProjectHome(state, target) {
+  if (!(target instanceof HTMLElement) || !target.isConnected) return false;
+  state.ignoreRouteUntil = Date.now() + 1200;
+  state.forwardingSidebarToggle = true;
+  try {
+    activateNavigationTarget(target);
+  } finally {
+    state.forwardingSidebarToggle = false;
+  }
+  preserveProjectHomeAfterSidebarToggle(state);
+  return true;
+}
+
+function preserveProjectHomeAfterSidebarToggle(state) {
+  for (const delay of [0, 50, 150, 300]) {
+    window.setTimeout(() => {
+      if (!state.current || !state.view || readProjectHomeFromUrl()) return;
+      replaceProjectHomeUrl(state.current.path, state.current.label);
+      syncProjectHomeHost(state);
+      syncHeaderForProjectHome(state);
+    }, delay);
+  }
 }
 
 function currentProjectFromSidebar(state) {
@@ -6129,4 +6176,5 @@ function iconSvg(paths) {
 module.exports.__test = {
   buildResumeSnapshot,
   headerControlInteractionStyle,
+  isNativeSidebarToggleLabel,
 };
