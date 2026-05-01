@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { execFileSync } = require("node:child_process");
 
 const DEFAULT_COLUMNS = [
   { id: "backlog", title: "Backlog" },
@@ -14,6 +15,8 @@ const DEFAULT_COLUMNS = [
 ];
 
 const PRIORITIES = ["urgent", "high", "medium", "low", "none"];
+const BRAIN_SECTIONS = ["facts", "decisions", "commands", "pitfalls"];
+const MAX_SESSION_DIGESTS = 30;
 
 const ISSUE_DEFAULTS = Object.freeze({
   title: "Untitled issue",
@@ -24,6 +27,15 @@ const ISSUE_DEFAULTS = Object.freeze({
   assignee: "",
   dueDate: "",
   comments: Object.freeze([]),
+});
+
+const BRAIN_DEFAULTS = Object.freeze({
+  version: 1,
+  facts: "",
+  decisions: "",
+  commands: "",
+  pitfalls: "",
+  digests: Object.freeze([]),
 });
 
 function createIssueStore(options = {}) {
@@ -64,6 +76,7 @@ function createIssueStore(options = {}) {
         columns: source.columns,
         issueDefaults: source.issueDefaults,
         settings: source.settings,
+        brain: source.brain || backup.brain,
         nextNumber: backup.nextNumber || source.nextNumber,
         issues: source.issues,
       }, normalizedProjectPath, file, issueDefaults);
@@ -74,6 +87,38 @@ function createIssueStore(options = {}) {
     list(projectPath) {
       const db = readProjectDb(issuesDir, projectPath, issueDefaults);
       return publicBoard(db);
+    },
+
+    getBrain(projectPath) {
+      const db = readProjectDb(issuesDir, projectPath, issueDefaults);
+      return publicBrain(db.brain);
+    },
+
+    updateBrain(projectPath, patch = {}) {
+      const db = readProjectDb(issuesDir, projectPath, issueDefaults);
+      db.brain = normalizeBrain({ ...(db.brain || {}), ...(patch || {}) });
+      writeProjectDb(issuesDir, db);
+      return publicBoard(db);
+    },
+
+    buildSessionDigestDraft(projectPath, input = {}) {
+      const db = readProjectDb(issuesDir, projectPath, issueDefaults);
+      return buildSessionDigestDraft(db, input);
+    },
+
+    createSessionDigest(projectPath, input = {}) {
+      const db = readProjectDb(issuesDir, projectPath, issueDefaults);
+      const draft = cleanMultiline(input.body)
+        ? normalizeSessionDigest(input, db, input.now)
+        : normalizeSessionDigest(buildSessionDigestDraft(db, input), db, input.now);
+      if (!draft) {
+        throw new Error("Session digest body is required");
+      }
+      db.brain = normalizeBrain(db.brain);
+      db.brain.digests = [draft, ...db.brain.digests.filter((digest) => digest.id !== draft.id)]
+        .slice(0, MAX_SESSION_DIGESTS);
+      writeProjectDb(issuesDir, db);
+      return { digest: draft, board: publicBoard(db) };
     },
 
     search(projectPath, query = "") {
@@ -302,6 +347,7 @@ function writeProjectDb(issuesDir, db) {
     columns: normalizeColumns(db.columns, db.issues),
     issueDefaults: cloneIssueDefaults(db.issueDefaults),
     settings: normalizeSettings(db.settings),
+    brain: publicBrain(db.brain),
     nextNumber: db.nextNumber,
     issues: db.issues,
     updatedAt: new Date().toISOString(),
@@ -323,6 +369,7 @@ function normalizeDb(raw, projectPath, file, issueDefaults = ISSUE_DEFAULTS) {
     columns: normalizeColumns(raw.columns, issues),
     issueDefaults: defaults,
     settings,
+    brain: normalizeBrain(raw.brain),
     nextNumber: Math.max(Number(raw.nextNumber) || 1, maxIssueNumber(issues) + 1),
     issues,
   };
@@ -358,8 +405,186 @@ function publicBoard(db) {
     columns: normalizeColumns(db.columns, db.issues),
     issueDefaults: cloneIssueDefaults(db.issueDefaults),
     settings: normalizeSettings(db.settings),
+    brain: publicBrain(db.brain),
     issues: [...db.issues].sort(compareIssueRank),
   };
+}
+
+function publicBrain(brain) {
+  const normalized = normalizeBrain(brain);
+  return {
+    version: normalized.version,
+    facts: normalized.facts,
+    decisions: normalized.decisions,
+    commands: normalized.commands,
+    pitfalls: normalized.pitfalls,
+    digests: normalized.digests.map((digest) => ({ ...digest })),
+  };
+}
+
+function normalizeBrain(raw = {}) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const brain = {
+    version: 1,
+    facts: "",
+    decisions: "",
+    commands: "",
+    pitfalls: "",
+    digests: [],
+  };
+  for (const section of BRAIN_SECTIONS) {
+    brain[section] = cleanMultiline(source[section]);
+  }
+  brain.digests = Array.isArray(source.digests)
+    ? source.digests.map((digest) => normalizeSessionDigest(digest)).filter(Boolean).slice(0, MAX_SESSION_DIGESTS)
+    : [];
+  return brain;
+}
+
+function normalizeSessionDigest(input = {}, db = null, now = undefined) {
+  if (!input || typeof input !== "object") return null;
+  const createdAt = exportTimestamp(input.createdAt || now);
+  const body = cleanMultiline(input.body || input.summary || "");
+  if (!body) return null;
+  const activeIssue = normalizeDigestActiveIssue(input.activeIssue || activeIssueForDb(db));
+  return {
+    id: cleanText(input.id) || sessionDigestId(createdAt, body),
+    title: cleanText(input.title) || `Session digest ${createdAt.slice(0, 10)}`,
+    body,
+    activeIssueId: cleanText(input.activeIssueId || activeIssue.id),
+    activeIssueTitle: cleanText(input.activeIssueTitle || activeIssue.title),
+    createdAt,
+    updatedAt: exportTimestamp(input.updatedAt || createdAt),
+  };
+}
+
+function buildSessionDigestDraft(db, input = {}) {
+  const now = exportTimestamp(input.now);
+  const board = publicBoard(db);
+  const active = activeIssueForDb(db);
+  const changedFiles = normalizeDigestLines(input.changedFiles).length
+    ? normalizeDigestLines(input.changedFiles)
+    : collectGitStatusLines(db.projectPath);
+  const verified = normalizeDigestLines(input.verified);
+  const notes = cleanMultiline(input.notes || input.note || "");
+  const next = cleanMultiline(input.next || "");
+  const shipped = normalizeDigestLines(input.shipped);
+  const risks = normalizeDigestLines(input.risks || input.notDone);
+  const openCounts = openIssueCounts(board.issues);
+  const focusIssues = board.issues
+    .filter((issue) => issue.status !== "done")
+    .sort(compareDigestIssue)
+    .slice(0, 5);
+
+  const lines = [
+    `Project: ${path.basename(db.projectPath) || db.projectPath || "-"}`,
+  ];
+  if (db.projectPath) lines.push(`Path: ${db.projectPath}`);
+  if (active?.id) lines.push(`Active Issue: ${active.id} ${active.title || ""}`.trim());
+  lines.push("", "Shipped:");
+  appendDigestBullets(lines, shipped, "-");
+  lines.push("", "Changed files:");
+  appendDigestBullets(lines, changedFiles, "-");
+  lines.push("", "Verified:");
+  appendDigestBullets(lines, verified, "-");
+  lines.push("", "Open work:");
+  appendDigestBullets(lines, Object.entries(openCounts).map(([status, count]) => `${status}: ${count}`), "-");
+  if (focusIssues.length) {
+    lines.push("", "Focus issues:");
+    appendDigestBullets(lines, focusIssues.map((issue) => `${issue.id} [${issue.priority}/${issue.status}] ${issue.title}`), "-");
+  }
+  if (notes) lines.push("", "Notes:", notes);
+  lines.push("", "Risks / not done:");
+  appendDigestBullets(lines, risks, "-");
+  lines.push("", "Next session starter:");
+  lines.push(next || "-");
+
+  return {
+    title: cleanText(input.title) || `Session digest ${now.slice(0, 10)}`,
+    body: lines.join("\n"),
+    activeIssueId: active?.id || "",
+    activeIssueTitle: active?.title || "",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function activeIssueForDb(db) {
+  if (!db || typeof db !== "object") return null;
+  const activeId = cleanText(db.settings?.activeIssueId);
+  return activeId ? db.issues.find((issue) => issue.id === activeId) || null : null;
+}
+
+function normalizeDigestActiveIssue(issue) {
+  return issue && typeof issue === "object"
+    ? {
+        id: cleanText(issue.id || issue.issueId),
+        title: cleanText(issue.title),
+      }
+    : { id: "", title: "" };
+}
+
+function collectGitStatusLines(projectPath) {
+  const cwd = cleanText(projectPath);
+  if (!cwd || !fs.existsSync(cwd)) return [];
+  try {
+    return execFileSync("git", ["-C", cwd, "status", "--short"], {
+      encoding: "utf8",
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 40);
+  } catch {
+    return [];
+  }
+}
+
+function openIssueCounts(issues = []) {
+  const counts = { backlog: 0, todo: 0, in_progress: 0, in_review: 0 };
+  for (const issue of Array.isArray(issues) ? issues : []) {
+    if (Object.prototype.hasOwnProperty.call(counts, issue.status)) {
+      counts[issue.status] += 1;
+    }
+  }
+  return counts;
+}
+
+function compareDigestIssue(a, b) {
+  return priorityRank(a.priority) - priorityRank(b.priority) ||
+    String(a.status || "").localeCompare(String(b.status || "")) ||
+    (Number(a.rank) || 0) - (Number(b.rank) || 0) ||
+    String(a.id || "").localeCompare(String(b.id || ""));
+}
+
+function priorityRank(priority) {
+  return ({ urgent: 0, high: 1, medium: 2, low: 3, none: 4 })[String(priority || "none").toLowerCase()] ?? 4;
+}
+
+function appendDigestBullets(lines, values, fallback) {
+  const items = normalizeDigestLines(values);
+  if (!items.length) {
+    lines.push(fallback);
+    return;
+  }
+  for (const item of items) lines.push(`- ${item}`);
+}
+
+function normalizeDigestLines(value) {
+  if (Array.isArray(value)) {
+    return value.map(cleanText).filter(Boolean);
+  }
+  return cleanMultiline(value)
+    .split("\n")
+    .map((line) => line.replace(/^[-*]\s+/, "").trim())
+    .filter(Boolean);
+}
+
+function sessionDigestId(createdAt, body) {
+  const hash = crypto.createHash("sha1").update(`${createdAt}\n${body}`).digest("hex").slice(0, 8).toUpperCase();
+  return `D-${hash}`;
 }
 
 function projectBackupPayload(db, now = new Date().toISOString()) {
@@ -407,6 +632,16 @@ function projectKey(projectPath) {
 
 function cleanText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function cleanMultiline(value) {
+  return String(value || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function normalizeStatus(value) {
@@ -699,8 +934,11 @@ function compareIssueRank(a, b) {
 
 module.exports = {
   DEFAULT_COLUMNS,
+  BRAIN_DEFAULTS,
+  BRAIN_SECTIONS,
   ISSUE_DEFAULTS,
   PRIORITIES,
+  buildSessionDigestDraft,
   createIssueStore,
   projectKey,
   projectPrefix,

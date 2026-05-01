@@ -16,6 +16,8 @@ V1 includes a per-project kanban board for Linear-style issues:
 - Right-click or use the issue ellipsis menu to edit, move, or delete
 - Right-click an issue and choose `Set active issue` to bridge it into Focus Composer
 - Publishes a local project snapshot so Focus Composer can build `Session Resume Pack` handoffs
+- Project Brain stores per-project facts, decisions, commands, pitfalls, and session digests in the same local JSON DB
+- Auto Session Digest drafts an end-of-session memory from the active issue, open work, and git status
 - Issues are stored in a JSON DB keyed by project path
 
 The tweak also includes `mcp-server.js`, a stdio MCP server backed by the same issue store. Tools:
@@ -51,6 +53,20 @@ args = ["/ABSOLUTE/PATH/TO/codex-plusplus/tweaks/project-home/mcp-server.js"]
 On macOS the absolute path is typically `/Users/<you>/Library/Application Support/codex-plusplus/tweaks/project-home/mcp-server.js`.
 
 To verify, ask Codex "what MCPs can you see?" — `project-home` should appear with the `project_home_*` tools. Once upstream Codex++ auto-registers MCP entries from tweak manifests, this manual step can go away.
+
+## Project Brain
+
+Open the Project Brain button in the Project Home header, or use Global Quick Actions:
+
+- `Open Project Brain`
+- `Create Session Digest`
+- `Copy Project Brain Pack`
+
+Project Brain is local-first. It is stored beside the issue board for the current project and included in Project Home backup/export JSON. The first version keeps plain-text sections for `Facts`, `Decisions`, `Commands`, and `Pitfalls`, plus a newest-first list of saved session digests.
+
+`Draft Digest` creates a reviewable session digest from reliable local context: project path, active issue, open issue counts, prioritized focus issues, and `git status --short` for the project folder. It does not scrape hidden Codex transcripts or invent work.
+
+Focus Composer can insert the current Brain Pack or latest digest after Project Home has published the project snapshot.
 
 ## Linear sync
 

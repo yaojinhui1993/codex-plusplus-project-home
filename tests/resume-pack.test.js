@@ -98,21 +98,74 @@ test("buildProjectHomeQuickActions registers start and ship-note actions", () =>
   assert.equal(typeof helpers.buildProjectHomeQuickActions, "function");
 
   const actions = helpers.buildProjectHomeQuickActions({});
-  assert.deepEqual(actions.map((action) => action.id), ["quick-capture", "start-work-session", "end-session-ship-note"]);
+  assert.deepEqual(actions.map((action) => action.id), [
+    "quick-capture",
+    "open-project-brain",
+    "create-session-digest",
+    "copy-project-brain-pack",
+    "start-work-session",
+    "end-session-ship-note",
+  ]);
   assert.equal(actions[0].source, "project-home");
   assert.equal(actions[0].title, "Quick Capture to Project Home");
-  assert.equal(actions[1].title, "Start Work Session");
-  assert.equal(actions[2].title, "End Session / Ship Note");
+  assert.equal(actions[1].title, "Open Project Brain");
+  assert.equal(actions[2].title, "Create Session Digest");
+  assert.equal(actions[3].title, "Copy Project Brain Pack");
+  assert.equal(actions[4].title, "Start Work Session");
+  assert.equal(actions[5].title, "End Session / Ship Note");
   assert.equal(actions[0].isDisabled({}), true);
   assert.equal(actions[0].isDisabled({ project: { projectLabel: "sniper-system" } }), true);
   assert.equal(actions[0].isDisabled({ project: { projectPath: "/Users/yjh/Playground/sniper-system" } }), false);
   assert.equal(actions[1].isDisabled({}), true);
   assert.equal(actions[2].isDisabled({}), true);
-  assert.equal(actions[1].isDisabled({ project: { projectLabel: "sniper-system" } }), false);
-  assert.equal(actions[2].isDisabled({ activeIssue: { issueId: "SNI-1" } }), false);
+  assert.equal(actions[3].isDisabled({}), true);
+  assert.equal(actions[4].isDisabled({}), true);
+  assert.equal(actions[5].isDisabled({}), true);
+  assert.equal(actions[4].isDisabled({ project: { projectLabel: "sniper-system" } }), false);
+  assert.equal(actions[5].isDisabled({ activeIssue: { issueId: "SNI-1" } }), false);
   assert.equal(typeof actions[0].run, "function");
   assert.equal(typeof actions[1].run, "function");
   assert.equal(typeof actions[2].run, "function");
+  assert.equal(typeof actions[3].run, "function");
+  assert.equal(typeof actions[4].run, "function");
+  assert.equal(typeof actions[5].run, "function");
+});
+
+test("Project Brain snapshots format local memory and latest digest", () => {
+  const helpers = projectHome.__test || {};
+  assert.equal(typeof helpers.buildProjectBrainSnapshot, "function");
+  assert.equal(typeof helpers.formatProjectBrainPack, "function");
+
+  const snapshot = helpers.buildProjectBrainSnapshot({
+    current: {
+      label: "sniper-system",
+      path: "/Users/yjh/Playground/sniper-system",
+    },
+    board: {
+      brain: {
+        facts: "Renderer tweak",
+        decisions: "Keep data local",
+        commands: "npm test",
+        pitfalls: "Repair after Codex upgrades",
+        digests: [{
+          id: "D-1",
+          title: "Session digest 2026-05-01",
+          body: "Shipped:\n- Project Brain",
+          createdAt: "2026-05-01T12:00:00.000Z",
+        }],
+      },
+    },
+  });
+
+  assert.equal(snapshot.projectLabel, "sniper-system");
+  assert.equal(snapshot.brain.facts, "Renderer tweak");
+  assert.equal(snapshot.latestDigest.id, "D-1");
+
+  const pack = helpers.formatProjectBrainPack(snapshot);
+  assert.match(pack, /^Project Brain/);
+  assert.match(pack, /Facts:\nRenderer tweak/);
+  assert.match(pack, /Latest Session Digest:/);
+  assert.match(pack, /Project Brain/);
 });
 
 test("buildQuickCaptureIssueInput normalizes lightweight capture values", () => {

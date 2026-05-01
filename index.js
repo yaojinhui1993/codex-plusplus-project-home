@@ -31,6 +31,8 @@ const ACTIVE_ISSUE_STORAGE_KEY = "codexpp.project-home.activeIssue.v1";
 const ACTIVE_ISSUE_CHANGED_EVENT = "codexpp-project-home-active-issue-changed";
 const RESUME_PACK_STORAGE_KEY = "codexpp.project-home.resumePack.v1";
 const RESUME_PACK_CHANGED_EVENT = "codexpp-project-home-resume-pack-changed";
+const PROJECT_BRAIN_STORAGE_KEY = "codexpp.project-home.brain.v1";
+const PROJECT_BRAIN_CHANGED_EVENT = "codexpp-project-home-brain-changed";
 const FOCUS_COMPOSER_LAUNCH_EVENT = "codexpp-focus-composer-launch";
 const QUICK_ACTIONS_REGISTER_EVENT = "codexpp-global-quick-actions-register";
 const QUICK_ACTIONS_UNREGISTER_EVENT = "codexpp-global-quick-actions-unregister";
@@ -53,6 +55,9 @@ const IPC_LINEAR_SYNC = "project-home:linear:sync";
 const IPC_BACKUP_CREATE = "project-home:backup:create";
 const IPC_BACKUP_EXPORT = "project-home:backup:export";
 const IPC_BACKUP_RESTORE = "project-home:backup:restore";
+const IPC_BRAIN_UPDATE = "project-home:brain:update";
+const IPC_DIGEST_DRAFT = "project-home:digest:draft";
+const IPC_DIGEST_CREATE = "project-home:digest:create";
 const LINEAR_API_SETTINGS_URL = "https://linear.app/settings/api";
 
 const ISSUE_COLUMNS = [
@@ -65,6 +70,12 @@ const ISSUE_COLUMNS = [
 
 const ISSUE_PRIORITIES = ["urgent", "high", "medium", "low", "none"];
 const DEFAULT_LABELS = ["bug", "feature", "ui", "docs", "chore"];
+const BRAIN_SECTIONS = [
+  ["facts", "Facts", "Architecture, entry points, invariants, or project facts."],
+  ["decisions", "Decisions", "One decision per line, with why it matters."],
+  ["commands", "Commands", "Common commands and when to run them."],
+  ["pitfalls", "Pitfalls", "Bugs, upgrade gotchas, and recovery notes."],
+];
 
 const ASIDE_SELECTOR = "aside.pointer-events-auto.relative.flex.overflow-hidden";
 const PATH_LIKE_RE = /^(?:~|\/|[A-Za-z]:[\\/])[^\n\r\t]+$/;
@@ -157,6 +168,9 @@ function startMain(self, api) {
       removeMainHandler(api, IPC_BACKUP_CREATE);
       removeMainHandler(api, IPC_BACKUP_EXPORT);
       removeMainHandler(api, IPC_BACKUP_RESTORE);
+      removeMainHandler(api, IPC_BRAIN_UPDATE);
+      removeMainHandler(api, IPC_DIGEST_DRAFT);
+      removeMainHandler(api, IPC_DIGEST_CREATE);
     },
   };
   self._state = state;
@@ -207,6 +221,12 @@ function startMain(self, api) {
   });
   replaceMainHandler(api, IPC_BACKUP_RESTORE, (payload) =>
     store.restoreProject(requireProjectPath(payload), payload?.backup || payload?.json || {}));
+  replaceMainHandler(api, IPC_BRAIN_UPDATE, (payload) =>
+    store.updateBrain(requireProjectPath(payload), payload?.brain || {}));
+  replaceMainHandler(api, IPC_DIGEST_DRAFT, (payload) =>
+    store.buildSessionDigestDraft(requireProjectPath(payload), payload || {}));
+  replaceMainHandler(api, IPC_DIGEST_CREATE, (payload) =>
+    store.createSessionDigest(requireProjectPath(payload), payload || {}));
 
   api.log.info("[project-home] main issue store active", { root: store.root });
 }
@@ -570,6 +590,9 @@ function startRenderer(self, api) {
     settingsSaveResetTimer: null,
     settingsSaveStatus: "idle",
     settingsSheetOpen: false,
+    brainSheetOpen: false,
+    brainDraft: null,
+    brainSaveStatus: "idle",
     quickCapture: null,
     editor: null,
     view: null,
@@ -1731,6 +1754,82 @@ function installStyle() {
       font-size: 12px;
     }
 
+    [${VIEW_ATTR}="editor-panel"][data-brain-panel] {
+      width: min(920px, calc(100vw - 48px));
+      max-height: min(86vh, 820px);
+    }
+
+    [data-brain-body] {
+      gap: 14px !important;
+    }
+
+    [data-brain-grid] {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    [data-brain-field] {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    [data-brain-field] span,
+    [data-brain-digest-head] strong {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--color-token-text-primary, currentColor);
+    }
+
+    [data-brain-field] textarea,
+    [data-brain-digest] textarea {
+      min-height: 84px;
+      height: auto;
+      resize: vertical;
+      line-height: 1.45;
+      font-family: inherit;
+    }
+
+    [data-brain-digest] {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 8px;
+      padding-top: 4px;
+      border-top: 1px solid var(--color-token-border-light, rgba(127,127,127,.16));
+    }
+
+    [data-brain-digest] textarea {
+      min-height: 190px;
+      font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+      font-size: 12px;
+    }
+
+    [data-brain-digest-head],
+    [data-brain-actions] {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    [data-brain-digest-head] span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      color: var(--color-token-description-foreground, currentColor);
+    }
+
+    @media (max-width: 760px) {
+      [data-brain-grid] {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+
     [${QUICK_CAPTURE_ATTR}="overlay"] {
       position: fixed;
       inset: 0;
@@ -2229,6 +2328,7 @@ function renderProjectHomeView(state) {
 
     if (state.editor) contentBlock.append(renderIssueEditor(state));
     if (state.settingsSheetOpen) contentBlock.append(renderProjectHomeSettingsSheet(state));
+    if (state.brainSheetOpen) contentBlock.append(renderProjectBrainSheet(state));
   } catch (error) {
     state.boardError = error?.message || String(error);
     contentBlock.replaceChildren(renderProjectHomeError(state.boardError));
@@ -2342,6 +2442,234 @@ function renderProjectHomeSettingsSheet(state) {
   panel.append(head, body, foot);
   backdrop.append(panel);
   return backdrop;
+}
+
+function openProjectBrainSheet(state, options = {}) {
+  state.brainSheetOpen = true;
+  state.brainSaveStatus = "idle";
+  if (options.digest) {
+    state.brainDraft = null;
+    void prepareSessionDigestDraft(state);
+  }
+  renderProjectHomeView(state);
+}
+
+function closeProjectBrainSheet(state) {
+  state.brainSheetOpen = false;
+  state.brainDraft = null;
+  state.brainSaveStatus = "idle";
+  renderProjectHomeView(state);
+}
+
+function renderProjectBrainSheet(state) {
+  const backdrop = document.createElement("div");
+  backdrop.setAttribute(VIEW_ATTR, "editor-backdrop");
+  backdrop.addEventListener("pointerdown", (event) => {
+    if (event.target === backdrop) closeProjectBrainSheet(state);
+  });
+
+  const panel = document.createElement("form");
+  panel.setAttribute(VIEW_ATTR, "editor-panel");
+  panel.setAttribute("data-brain-panel", "");
+  panel.setAttribute("aria-label", "Project Brain");
+  panel.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+  const head = document.createElement("div");
+  head.setAttribute("data-editor-head", "");
+  const crumb = document.createElement("div");
+  crumb.setAttribute("data-editor-crumb", "");
+  crumb.textContent = "Project Brain";
+  const meta = pageEl("div", "ml-auto text-xs text-token-text-secondary");
+  meta.textContent = basenameFor(state.current?.path, state.current?.label || "Project");
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "flex size-7 items-center justify-center rounded-md text-token-description-foreground hover:bg-token-list-hover-background hover:text-token-foreground";
+  close.setAttribute("aria-label", "Close Project Brain");
+  close.innerHTML = xIconSvg();
+  close.addEventListener("click", () => closeProjectBrainSheet(state));
+  head.append(crumb, meta, close);
+
+  const brain = normalizeProjectBrain(state.board?.brain);
+  const body = document.createElement("div");
+  body.setAttribute("data-editor-body", "");
+  body.setAttribute("data-brain-body", "");
+
+  const grid = document.createElement("div");
+  grid.setAttribute("data-brain-grid", "");
+  const inputs = {};
+  for (const [key, label, placeholder] of BRAIN_SECTIONS) {
+    const field = document.createElement("label");
+    field.setAttribute("data-brain-field", key);
+    const title = document.createElement("span");
+    title.textContent = label;
+    const input = document.createElement("textarea");
+    input.name = key;
+    input.rows = key === "commands" ? 4 : 3;
+    input.value = brain[key] || "";
+    input.placeholder = placeholder;
+    input.spellcheck = false;
+    input.className = sheetInputClass();
+    field.append(title, input);
+    grid.append(field);
+    inputs[key] = input;
+  }
+
+  const digestWrap = document.createElement("section");
+  digestWrap.setAttribute("data-brain-digest", "");
+  const digestHead = document.createElement("div");
+  digestHead.setAttribute("data-brain-digest-head", "");
+  const digestTitle = document.createElement("strong");
+  digestTitle.textContent = "Session Digest";
+  const digestMeta = document.createElement("span");
+  const latest = brain.digests[0] || null;
+  digestMeta.textContent = latest ? `Latest: ${latest.title}` : "No saved digests yet";
+  digestHead.append(digestTitle, digestMeta);
+
+  const digestInput = document.createElement("textarea");
+  digestInput.name = "digest";
+  digestInput.rows = 8;
+  digestInput.value = state.brainDraft?.body || latest?.body || "";
+  digestInput.placeholder = "Draft or edit the end-of-session digest here.";
+  digestInput.spellcheck = false;
+  digestInput.className = sheetInputClass();
+
+  const digestControls = document.createElement("div");
+  digestControls.setAttribute("data-brain-actions", "");
+  const draft = pageButton(state.brainDraft ? "Refresh Draft" : "Draft Digest", "secondary");
+  draft.addEventListener("click", () => void prepareSessionDigestDraft(state));
+  const saveDigest = pageButton("Save Digest", "secondary");
+  saveDigest.addEventListener("click", async () => {
+    await saveSessionDigest(state, {
+      title: state.brainDraft?.title || `Session digest ${new Date().toISOString().slice(0, 10)}`,
+      body: digestInput.value,
+    });
+  });
+  digestControls.append(draft, saveDigest);
+  digestWrap.append(digestHead, digestInput, digestControls);
+
+  body.append(grid, digestWrap);
+
+  const foot = document.createElement("div");
+  foot.setAttribute("data-editor-foot", "");
+  const status = document.createElement("div");
+  status.setAttribute("data-editor-hint", "");
+  status.textContent = state.brainSaveStatus === "saved"
+    ? "Saved."
+    : state.brainSaveStatus === "saving"
+      ? "Saving..."
+      : "Local memory for this project.";
+  const actions = document.createElement("div");
+  actions.setAttribute("data-brain-actions", "");
+  const copy = pageButton("Copy Brain Pack", "secondary");
+  copy.addEventListener("click", () => void copyProjectBrainPack(state, collectBrainPatch(inputs)));
+  const insert = pageButton("Insert", "secondary");
+  insert.addEventListener("click", () => insertProjectBrainPack(state, collectBrainPatch(inputs)));
+  const save = pageButton(state.brainSaveStatus === "saved" ? "Saved" : "Save Brain", state.brainSaveStatus === "saved" ? "success" : "primary");
+  save.type = "submit";
+  actions.append(copy, insert, save);
+  foot.append(status, actions);
+
+  panel.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await saveProjectBrain(state, collectBrainPatch(inputs));
+  });
+
+  panel.append(head, body, foot);
+  backdrop.append(panel);
+  return backdrop;
+}
+
+function collectBrainPatch(inputs = {}) {
+  const patch = {};
+  for (const [key] of BRAIN_SECTIONS) patch[key] = inputs[key]?.value || "";
+  return patch;
+}
+
+async function saveProjectBrain(state, brainPatch) {
+  if (!state.current?.path) return;
+  state.brainSaveStatus = "saving";
+  renderProjectHomeView(state);
+  try {
+    await mutateBoard(state, IPC_BRAIN_UPDATE, {
+      projectPath: state.current.path,
+      brain: brainPatch,
+    });
+    state.brainSaveStatus = "saved";
+    syncSharedProjectBrain(state);
+  } catch (error) {
+    state.boardError = error?.message || String(error);
+  } finally {
+    renderProjectHomeView(state);
+  }
+}
+
+async function prepareSessionDigestDraft(state) {
+  if (!state.current?.path) return;
+  try {
+    state.brainDraft = await state.api.ipc.invoke(IPC_DIGEST_DRAFT, {
+      projectPath: state.current.path,
+    });
+    renderProjectHomeView(state);
+  } catch (error) {
+    state.boardError = error?.message || String(error);
+    renderProjectHomeView(state);
+  }
+}
+
+async function saveSessionDigest(state, input = {}) {
+  if (!state.current?.path) return;
+  const body = cleanBrainText(input.body);
+  if (!body) return;
+  state.brainSaveStatus = "saving";
+  renderProjectHomeView(state);
+  try {
+    const result = await state.api.ipc.invoke(IPC_DIGEST_CREATE, {
+      projectPath: state.current.path,
+      title: input.title,
+      body,
+    });
+    state.board = normalizeBoard(result?.board || state.board);
+    state.brainDraft = result?.digest || null;
+    state.brainSaveStatus = "saved";
+    syncSharedProjectBrain(state);
+  } catch (error) {
+    state.boardError = error?.message || String(error);
+  } finally {
+    renderProjectHomeView(state);
+  }
+}
+
+async function copyProjectBrainPack(state, patch = null) {
+  const snapshot = buildProjectBrainSnapshot({
+    ...state,
+    board: {
+      ...(state.board || {}),
+      brain: patch ? normalizeProjectBrain({ ...(state.board?.brain || {}), ...patch }) : state.board?.brain,
+    },
+  });
+  const copied = await copyToClipboard(formatProjectBrainPack(snapshot || {}));
+  if (!copied) window.alert("Could not copy Project Brain pack.");
+}
+
+function insertProjectBrainPack(state, patch = null) {
+  const snapshot = buildProjectBrainSnapshot({
+    ...state,
+    board: {
+      ...(state.board || {}),
+      brain: patch ? normalizeProjectBrain({ ...(state.board?.brain || {}), ...patch }) : state.board?.brain,
+    },
+  });
+  window.dispatchEvent(new CustomEvent(FOCUS_COMPOSER_LAUNCH_EVENT, {
+    detail: {
+      version: 1,
+      source: QUICK_ACTIONS_SOURCE,
+      kind: "project-brain",
+      text: formatProjectBrainPack(snapshot || {}),
+      project: buildResumeSnapshot(state),
+      activeIssue: activeIssueBridgePayload(state),
+      requestedAt: new Date().toISOString(),
+    },
+  }));
 }
 
 function renderProjectHomeSettingsPage(root, state) {
@@ -3750,6 +4078,7 @@ async function loadProjectHomeBoard(state, project, options = {}) {
     state.board = normalizeBoard(board);
     syncSharedActiveIssue(state);
     syncSharedResumePack(state);
+    syncSharedProjectBrain(state);
     state.headerSignature = "";
   } catch (error) {
     if (state.disposed || !sameProject(state.current, project)) return;
@@ -3883,6 +4212,23 @@ function syncSharedResumePack(state) {
   }
 }
 
+function syncSharedProjectBrain(state) {
+  const payload = buildProjectBrainSnapshot(state);
+  try {
+    if (payload) {
+      window.localStorage?.setItem?.(PROJECT_BRAIN_STORAGE_KEY, JSON.stringify(payload));
+    } else {
+      const existing = readSharedProjectBrain();
+      if (!existing || existing.projectPath === state.current?.path) {
+        window.localStorage?.removeItem?.(PROJECT_BRAIN_STORAGE_KEY);
+      }
+    }
+    window.dispatchEvent(new CustomEvent(PROJECT_BRAIN_CHANGED_EVENT, { detail: payload || null }));
+  } catch (error) {
+    state.api.log.warn("[project-home] brain bridge write failed", { error: error?.message || String(error) });
+  }
+}
+
 function startWorkSession(state) {
   startFocusComposerLaunch(state, buildWorkSessionLaunchPayload, "work session");
 }
@@ -3949,6 +4295,39 @@ function buildProjectHomeQuickActions(state = {}) {
       disabledReason: "No Project Home project",
       isDisabled: (context) => !hasProjectHomeQuickCaptureContext(state, context),
       run: (context) => runProjectHomeQuickAction(state, "quick-capture", context),
+    },
+    {
+      source: QUICK_ACTIONS_SOURCE,
+      id: "open-project-brain",
+      title: "Open Project Brain",
+      subtitle: "Edit local facts, decisions, commands, pitfalls, and session digests.",
+      keywords: ["project home", "brain", "memory", "facts", "digest"],
+      shortcut: "Brain",
+      disabledReason: "No open Project Home project",
+      isDisabled: () => !state?.current?.path || !state?.board,
+      run: (context) => runProjectHomeQuickAction(state, "open-brain", context),
+    },
+    {
+      source: QUICK_ACTIONS_SOURCE,
+      id: "create-session-digest",
+      title: "Create Session Digest",
+      subtitle: "Draft and save a local end-of-session memory for this project.",
+      keywords: ["project home", "brain", "digest", "session", "handoff"],
+      shortcut: "Digest",
+      disabledReason: "No open Project Home project",
+      isDisabled: () => !state?.current?.path || !state?.board,
+      run: (context) => runProjectHomeQuickAction(state, "create-digest", context),
+    },
+    {
+      source: QUICK_ACTIONS_SOURCE,
+      id: "copy-project-brain-pack",
+      title: "Copy Project Brain Pack",
+      subtitle: "Copy local project memory and latest digest for a new Codex thread.",
+      keywords: ["project home", "brain", "copy", "memory", "pack"],
+      shortcut: "Copy",
+      disabledReason: "No open Project Home project",
+      isDisabled: () => !state?.current?.path || !state?.board,
+      run: (context) => runProjectHomeQuickAction(state, "copy-brain-pack", context),
     },
     {
       source: QUICK_ACTIONS_SOURCE,
@@ -4140,6 +4519,15 @@ function runProjectHomeQuickAction(state, kind, context = {}) {
     openQuickCaptureDialog(state, context);
     return;
   }
+  if (kind === "open-brain" || kind === "create-digest" || kind === "copy-brain-pack") {
+    if (!state?.current || !state?.board) return;
+    if (kind === "copy-brain-pack") {
+      void copyProjectBrainPack(state);
+      return;
+    }
+    openProjectBrainSheet(state, { digest: kind === "create-digest" });
+    return;
+  }
   if (state?.current && state?.board) {
     if (kind === "ship-note") startShipNoteSession(state);
     else startWorkSession(state);
@@ -4238,6 +4626,66 @@ function buildResumeSnapshot(state) {
       .filter(Boolean),
     updatedAt: new Date().toISOString(),
   };
+}
+
+function buildProjectBrainSnapshot(state) {
+  const current = state?.current || {};
+  const brain = normalizeProjectBrain(state?.board?.brain);
+  if (!current.path && !current.label && !projectBrainHasContent(brain)) return null;
+  return {
+    version: 1,
+    source: "project-home",
+    projectPath: current.path || "",
+    projectLabel: current.label || basenameFor(current.path, "Project"),
+    brain,
+    latestDigest: brain.digests[0] || null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function projectBrainHasContent(brain = {}) {
+  const normalized = normalizeProjectBrain(brain);
+  return BRAIN_SECTIONS.some(([key]) => Boolean(normalized[key])) || normalized.digests.length > 0;
+}
+
+function formatProjectBrainPack(input = {}) {
+  const snapshot = input?.brain ? input : { brain: input };
+  const brain = normalizeProjectBrain(snapshot.brain);
+  const lines = [
+    "Project Brain",
+    "",
+    "Project:",
+    snapshot.projectLabel || snapshot.projectPath || "-",
+  ];
+  if (snapshot.projectPath && snapshot.projectPath !== snapshot.projectLabel) lines.push(snapshot.projectPath);
+  for (const [key, label] of BRAIN_SECTIONS) {
+    lines.push("", `${label}:`);
+    appendBrainText(lines, brain[key]);
+  }
+  if (brain.digests.length) {
+    lines.push("", "Latest Session Digest:");
+    lines.push(`${brain.digests[0].title} (${brain.digests[0].createdAt || "-"})`);
+    lines.push(brain.digests[0].body);
+  }
+  return lines.join("\n");
+}
+
+function appendBrainText(lines, value) {
+  const text = cleanBrainText(value);
+  if (!text) {
+    lines.push("-");
+    return;
+  }
+  lines.push(text);
+}
+
+function readSharedProjectBrain() {
+  try {
+    const raw = window.localStorage?.getItem?.(PROJECT_BRAIN_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 }
 
 function isDoneStatus(status) {
@@ -4348,6 +4796,7 @@ async function mutateBoard(state, channel, payload) {
       state.board = normalizeBoard(board);
       syncSharedActiveIssue(state);
       syncSharedResumePack(state);
+      syncSharedProjectBrain(state);
       state.headerSignature = "";
     }
     const issueId = result?.issue?.id || payload?.issueId || "";
@@ -4397,7 +4846,51 @@ function normalizeBoard(board) {
     columns: Array.isArray(board?.columns) ? board.columns : ISSUE_COLUMNS,
     issues: Array.isArray(board?.issues) ? board.issues : [],
     settings: board?.settings && typeof board.settings === "object" ? board.settings : { linear: {} },
+    brain: normalizeProjectBrain(board?.brain),
   };
+}
+
+function normalizeProjectBrain(input = {}) {
+  const source = input && typeof input === "object" ? input : {};
+  return {
+    version: 1,
+    facts: cleanBrainText(source.facts),
+    decisions: cleanBrainText(source.decisions),
+    commands: cleanBrainText(source.commands),
+    pitfalls: cleanBrainText(source.pitfalls),
+    digests: Array.isArray(source.digests)
+      ? source.digests.map(normalizeSessionDigest).filter(Boolean).slice(0, 30)
+      : [],
+  };
+}
+
+function normalizeSessionDigest(input = {}) {
+  if (!input || typeof input !== "object") return null;
+  const body = cleanBrainText(input.body || input.summary);
+  if (!body) return null;
+  return {
+    id: cleanBrainInline(input.id) || `D-${Math.random().toString(16).slice(2, 10).toUpperCase()}`,
+    title: cleanBrainInline(input.title) || "Session digest",
+    body,
+    activeIssueId: cleanBrainInline(input.activeIssueId),
+    activeIssueTitle: cleanBrainInline(input.activeIssueTitle),
+    createdAt: cleanBrainInline(input.createdAt) || new Date().toISOString(),
+    updatedAt: cleanBrainInline(input.updatedAt) || cleanBrainInline(input.createdAt) || new Date().toISOString(),
+  };
+}
+
+function cleanBrainText(value) {
+  return String(value || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function cleanBrainInline(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
 }
 
 function filteredIssues(state) {
@@ -5417,6 +5910,8 @@ function closeProjectHome(state, options = {}) {
   state.current = null;
   state.board = null;
   state.editor = null;
+  state.brainSheetOpen = false;
+  state.brainDraft = null;
   syncProjectHomeSidebarState(state);
   if (options.updateHistory) removeProjectHomeHash();
 }
@@ -5439,6 +5934,8 @@ function dismissProjectHomeForNativeNavigation(state, navTarget, options = {}) {
   state.current = null;
   state.board = null;
   state.editor = null;
+  state.brainSheetOpen = false;
+  state.brainDraft = null;
   closeProjectHomeContextMenu(state);
   syncProjectHomeSidebarState(state);
   const root = state.view;
@@ -5799,6 +6296,7 @@ function renderProjectHomeHeader(state, node) {
     renderQuickCaptureButton(state),
     renderStartWorkButton(state),
     renderEndSessionButton(state),
+    renderProjectBrainButton(state),
     renderIssueSearch(state),
     renderViewModeToggle(state),
     renderColumnMenuButton(state),
@@ -5824,6 +6322,12 @@ function renderStartWorkButton(state) {
 function renderEndSessionButton(state) {
   return headerIconButton("End session / ship note", circleCheckIconSvg(), () => {
     startShipNoteSession(state);
+  });
+}
+
+function renderProjectBrainButton(state) {
+  return headerIconButton("Project Brain", brainIconSvg(), () => {
+    openProjectBrainSheet(state);
   });
 }
 
@@ -6128,6 +6632,7 @@ async function restoreProjectFromClipboard(state) {
     clearIssueSelection(state, { render: false });
     syncSharedActiveIssue(state);
     syncSharedResumePack(state);
+    syncSharedProjectBrain(state);
     state.headerSignature = "";
     renderProjectHomeView(state);
     syncHeaderForProjectHome(state);
@@ -6827,6 +7332,14 @@ function plusSquareIconSvg() {
   return iconSvg('<rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M12 8v8"></path><path d="M8 12h8"></path>');
 }
 
+function brainIconSvg() {
+  return iconSvg(
+    '<path d="M9 3a3 3 0 0 0-3 3v1.2A3 3 0 0 0 4 10v1a3 3 0 0 0 2 2.83V18a3 3 0 0 0 5 2.24V3.76A2.99 2.99 0 0 0 9 3Z"></path>' +
+      '<path d="M15 3a3 3 0 0 1 3 3v1.2A3 3 0 0 1 20 10v1a3 3 0 0 1-2 2.83V18a3 3 0 0 1-5 2.24V3.76A2.99 2.99 0 0 1 15 3Z"></path>' +
+      '<path d="M8 9h3"></path><path d="M13 9h3"></path><path d="M8 14h3"></path><path d="M13 14h3"></path>',
+  );
+}
+
 function settingsIconSvg() {
   return iconSvg(
     '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.52a2 2 0 0 1-1 1.72l-.15.1a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.52a2 2 0 0 1 1-1.72l.15-.1a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>' +
@@ -6867,6 +7380,9 @@ module.exports.__test = {
   buildResumeSnapshot,
   buildWorkSessionLaunchPayload,
   buildShipNoteLaunchPayload,
+  buildProjectBrainSnapshot,
+  formatProjectBrainPack,
+  normalizeProjectBrain,
   buildProjectHomeQuickActions,
   buildQuickCaptureIssueInput,
   buildProjectHomeKeyboardShortcuts,
