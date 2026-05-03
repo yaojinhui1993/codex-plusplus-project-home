@@ -285,3 +285,32 @@ test("native sidebar toggle labels are protected while Project Home is open", ()
   assert.equal(helpers.isNativeSidebarToggleLabel("Show sidebar"), true);
   assert.equal(helpers.isNativeSidebarToggleLabel("Project Home settings"), false);
 });
+
+test("Project Home reserves space when the native right panel overlays the route host", () => {
+  const helpers = projectHome.__test || {};
+  assert.equal(typeof helpers.projectHomeRightOverlayInset, "function");
+
+  assert.equal(helpers.projectHomeRightOverlayInset({
+    viewportWidth: 2048,
+    hostRect: { left: 0, right: 2048, top: 44, bottom: 1100, width: 2048, height: 1056 },
+    panelRects: [
+      { left: 1660, right: 2048, top: 44, bottom: 1100, width: 388, height: 1056 },
+    ],
+  }), 388);
+
+  assert.equal(helpers.projectHomeRightOverlayInset({
+    viewportWidth: 2048,
+    hostRect: { left: 0, right: 1660, top: 44, bottom: 1100, width: 1660, height: 1056 },
+    panelRects: [
+      { left: 1660, right: 2048, top: 44, bottom: 1100, width: 388, height: 1056 },
+    ],
+  }), 0);
+
+  assert.equal(helpers.projectHomeRightOverlayInset({
+    viewportWidth: 2048,
+    hostRect: { left: 0, right: 2048, top: 44, bottom: 1100, width: 2048, height: 1056 },
+    panelRects: [
+      { left: 1408, right: 2048, top: 0, bottom: 36, width: 640, height: 36 },
+    ],
+  }), 0);
+});

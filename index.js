@@ -41,6 +41,11 @@ const SHORTCUTS_REGISTER_EVENT = "codexpp-keyboard-shortcuts-register";
 const SHORTCUTS_UNREGISTER_EVENT = "codexpp-keyboard-shortcuts-unregister";
 const SHORTCUTS_REFRESH_EVENT = "codexpp-keyboard-shortcuts-request-refresh";
 const QUICK_ACTIONS_SOURCE = "project-home";
+const RIGHT_PANEL_OVERLAY_SELECTOR = [
+  '[data-app-shell-focus-area="right-panel"]',
+  '[data-browser-sidebar-conversation-id]',
+  "webview",
+].join(",");
 
 const IPC_BOARD_LIST = "project-home:issues:list";
 const IPC_ISSUE_CREATE = "project-home:issue:create";
@@ -6584,6 +6589,7 @@ function syncProjectHomeHost(state) {
   if (state.host !== host || state.view.parentElement !== host) {
     mountProjectHomeRoot(state, host, state.view);
   }
+  syncProjectHomeRightOverlayInset(state);
 }
 
 function handleRouteChange(state) {
@@ -6674,6 +6680,7 @@ function mountProjectHomeRoot(state, host, root) {
   host.replaceChildren(root);
   host.setAttribute(VIEW_ATTR, "host");
   state.host = host;
+  syncProjectHomeRightOverlayInset(state);
   syncHeaderForProjectHome(state);
 }
 
@@ -6702,6 +6709,95 @@ function routeContentHost() {
     child.tagName !== "HEADER"
   ));
   return host instanceof HTMLElement ? host : null;
+}
+
+function syncProjectHomeRightOverlayInset(state) {
+  const root = state.view;
+  const host = state.host instanceof HTMLElement ? state.host : routeContentHost();
+  if (!(root instanceof HTMLElement) || !(host instanceof HTMLElement)) return;
+  const inset = projectHomeRightOverlayInset({
+    viewportWidth: window.innerWidth || document.documentElement?.clientWidth || 0,
+    hostRect: rectSnapshot(host.getBoundingClientRect()),
+    panelRects: rightPanelOverlayRects(root),
+  });
+  applyProjectHomeRightOverlayInset(root, inset);
+}
+
+function rightPanelOverlayRects(projectRoot) {
+  const seen = new Set();
+  const rects = [];
+  for (const node of document.querySelectorAll(RIGHT_PANEL_OVERLAY_SELECTOR)) {
+    if (!(node instanceof HTMLElement) || seen.has(node)) continue;
+    seen.add(node);
+    if (projectRoot instanceof HTMLElement && projectRoot.contains(node)) continue;
+    const rect = rectSnapshot(node.getBoundingClientRect());
+    const style = window.getComputedStyle(node);
+    if (
+      rect.width <= 0 ||
+      rect.height <= 0 ||
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      style.opacity === "0"
+    ) {
+      continue;
+    }
+    rects.push(rect);
+  }
+  return rects;
+}
+
+function rectSnapshot(rect = {}) {
+  const left = Number(rect.left) || 0;
+  const right = Number(rect.right) || 0;
+  const top = Number(rect.top) || 0;
+  const bottom = Number(rect.bottom) || 0;
+  return {
+    left,
+    right,
+    top,
+    bottom,
+    width: Number(rect.width) || Math.max(0, right - left),
+    height: Number(rect.height) || Math.max(0, bottom - top),
+  };
+}
+
+function projectHomeRightOverlayInset(input = {}) {
+  const viewportWidth = Math.max(0, Number(input.viewportWidth) || 0);
+  const host = rectSnapshot(input.hostRect || {});
+  const panelRects = Array.isArray(input.panelRects) ? input.panelRects.map(rectSnapshot) : [];
+  if (viewportWidth <= 0 || host.width <= 0 || host.height <= 0) return 0;
+
+  let left = Infinity;
+  for (const rect of panelRects) {
+    if (!rightPanelRectOverlaysHost(rect, host, viewportWidth)) continue;
+    left = Math.min(left, rect.left);
+  }
+  if (!Number.isFinite(left)) return 0;
+
+  const inset = Math.ceil(host.right - left);
+  const maxInset = Math.max(0, host.width - 320);
+  return Math.max(0, Math.min(inset, maxInset));
+}
+
+function rightPanelRectOverlaysHost(rect, host, viewportWidth) {
+  if (rect.width < 180 || rect.height < 80) return false;
+  if (rect.right < viewportWidth - 32) return false;
+  if (rect.left >= host.right - 1) return false;
+  if (rect.right <= host.left + 1) return false;
+  const verticalOverlap = Math.min(rect.bottom, host.bottom) - Math.max(rect.top, host.top);
+  if (verticalOverlap < 80) return false;
+  return rect.left > host.left + 240;
+}
+
+function applyProjectHomeRightOverlayInset(root, inset) {
+  const value = Math.max(0, Math.round(Number(inset) || 0));
+  if (value > 0) {
+    root.style.setProperty("--project-home-right-overlay-inset", `${value}px`);
+    root.style.marginRight = "var(--project-home-right-overlay-inset)";
+  } else {
+    root.style.removeProperty("--project-home-right-overlay-inset");
+    root.style.marginRight = "";
+  }
 }
 
 function captureRestoreTarget() {
@@ -8027,4 +8123,5 @@ module.exports.__test = {
   buildProjectHomeKeyboardShortcuts,
   headerControlInteractionStyle,
   isNativeSidebarToggleLabel,
+  projectHomeRightOverlayInset,
 };
