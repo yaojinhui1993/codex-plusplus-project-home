@@ -280,10 +280,37 @@ test("header icon controls opt out of Electron drag regions", () => {
 test("native sidebar toggle labels are protected while Project Home is open", () => {
   const helpers = projectHome.__test || {};
   assert.equal(typeof helpers.isNativeSidebarToggleLabel, "function");
+  assert.equal(typeof helpers.isNativePanelToggleLabel, "function");
+  assert.equal(typeof helpers.shouldRestoreHostBeforeNativePanelToggle, "function");
 
   assert.equal(helpers.isNativeSidebarToggleLabel("Hide sidebar"), true);
   assert.equal(helpers.isNativeSidebarToggleLabel("Show sidebar"), true);
   assert.equal(helpers.isNativeSidebarToggleLabel("Project Home settings"), false);
+  assert.equal(helpers.isNativePanelToggleLabel("Close side panel"), true);
+  assert.equal(helpers.isNativePanelToggleLabel("Toggle right panel"), true);
+  assert.equal(helpers.isNativePanelToggleLabel("Project Home settings"), false);
+
+  assert.equal(helpers.shouldRestoreHostBeforeNativePanelToggle({
+    label: "Close side panel",
+    rect: { left: 1996, right: 2036, top: 8, bottom: 44, width: 40, height: 36 },
+    viewportWidth: 2048,
+  }), true);
+  assert.equal(helpers.shouldRestoreHostBeforeNativePanelToggle({
+    label: "合并侧边栏",
+    rect: { left: 1996, right: 2036, top: 8, bottom: 44, width: 40, height: 36 },
+    viewportWidth: 2048,
+  }), true);
+
+  assert.equal(helpers.shouldRestoreHostBeforeNativePanelToggle({
+    label: "Hide sidebar",
+    rect: { left: 168, right: 204, top: 8, bottom: 44, width: 36, height: 36 },
+    viewportWidth: 2048,
+  }), false);
+  assert.equal(helpers.shouldRestoreHostBeforeNativePanelToggle({
+    label: "Add issue",
+    rect: { left: 1996, right: 2036, top: 72, bottom: 108, width: 40, height: 36 },
+    viewportWidth: 2048,
+  }), false);
 });
 
 test("Project Home reserves space when the native right panel overlays the route host", () => {

@@ -726,10 +726,10 @@ function startRenderer(self, api) {
   };
   state.onClick = (event) => {
     if (state.view && !state.forwardingSidebarToggle) {
-      const sidebarToggle = closestNativeSidebarToggleButton(event.target);
-      if (sidebarToggle) {
+      const panelToggle = closestNativePanelToggleButton(event.target);
+      if (panelToggle) {
         stopProjectHomeEvent(event);
-        activateSidebarToggleForProjectHome(state, sidebarToggle);
+        activateNativePanelToggleForProjectHome(state, panelToggle);
         return;
       }
     }
@@ -766,7 +766,7 @@ function startRenderer(self, api) {
       const target = findSidebarToggleButton();
       if (!target) return;
       stopProjectHomeEvent(event);
-      activateSidebarToggleForProjectHome(state, target);
+      activateNativePanelToggleForProjectHome(state, target);
       return;
     }
 
@@ -7535,12 +7535,18 @@ function findSidebarToggleButton() {
   }) || null;
 }
 
-function closestNativeSidebarToggleButton(target) {
+function closestNativePanelToggleButton(target) {
   if (!(target instanceof Element)) return null;
   const button = target.closest("button");
   if (!(button instanceof HTMLButtonElement)) return null;
   if (button.closest(`[${HEADER_ATTR}="root"]`)) return null;
-  return isNativeSidebarToggleLabel(sidebarToggleLabelFor(button)) ? button : null;
+  const label = sidebarToggleLabelFor(button);
+  if (isNativePanelToggleLabel(label)) return button;
+  return shouldRestoreHostBeforeNativePanelToggle({
+    label,
+    rect: rectSnapshot(button.getBoundingClientRect()),
+    viewportWidth: window.innerWidth || document.documentElement?.clientWidth || 0,
+  }) ? button : null;
 }
 
 function sidebarToggleLabelFor(button) {
@@ -7552,9 +7558,70 @@ function isNativeSidebarToggleLabel(label) {
   return value === "hide sidebar" || value === "show sidebar";
 }
 
-function activateSidebarToggleForProjectHome(state, target) {
+function isNativePanelToggleLabel(label) {
+  const value = normalize(label);
+  if (isNativeSidebarToggleLabel(value)) return true;
+  return (
+    value === "toggle sidebar" ||
+    value === "toggle side panel" ||
+    value === "toggle right panel" ||
+    value === "toggle right sidebar" ||
+    value === "show side panel" ||
+    value === "hide side panel" ||
+    value === "open side panel" ||
+    value === "close side panel" ||
+    value === "show right panel" ||
+    value === "hide right panel" ||
+    value === "open right panel" ||
+    value === "close right panel" ||
+    value === "show right sidebar" ||
+    value === "hide right sidebar" ||
+    value === "open right sidebar" ||
+    value === "close right sidebar" ||
+    value === "collapse side panel" ||
+    value === "expand side panel" ||
+    value === "collapse right panel" ||
+    value === "expand right panel" ||
+    value === "collapse right sidebar" ||
+    value === "expand right sidebar"
+  );
+}
+
+function shouldRestoreHostBeforeNativePanelToggle(input = {}) {
+  const value = normalize(input.label);
+  const rect = rectSnapshot(input.rect || {});
+  const viewportWidth = Math.max(0, Number(input.viewportWidth) || 0);
+  if (viewportWidth <= 0 || rect.width <= 0 || rect.height <= 0) return false;
+  const nearRightEdge = rect.right >= viewportWidth - 56 && rect.left >= viewportWidth - 96;
+  const compactHeaderButton = rect.width <= 56 && rect.height <= 56;
+  const topChromeButton = rect.top <= 48 && rect.bottom <= 72;
+  if (!nearRightEdge || !compactHeaderButton || !topChromeButton) return false;
+  if (!value) return true;
+  if (isNativeSidebarToggleLabel(value)) return false;
+  return (
+    /\b(right|side|sidebar|panel)\b/.test(value) ||
+    /[右侧边栏面板合并展开收起关闭打开]/.test(value) ||
+    value === "toggle" ||
+    value === "close" ||
+    value === "collapse" ||
+    value === "expand"
+  );
+}
+
+function activateNativePanelToggleForProjectHome(state, target) {
   if (!(target instanceof HTMLElement) || !target.isConnected) return false;
   state.ignoreRouteUntil = Date.now() + 1200;
+  if (shouldRestoreHostBeforeNativePanelToggle({
+    label: sidebarToggleLabelFor(target),
+    rect: rectSnapshot(target.getBoundingClientRect()),
+    viewportWidth: window.innerWidth || document.documentElement?.clientWidth || 0,
+  })) {
+    restoreProjectHomeHost(state);
+    if (!target.isConnected) {
+      preserveProjectHomeAfterSidebarToggle(state);
+      return false;
+    }
+  }
   state.forwardingSidebarToggle = true;
   try {
     activateNavigationTarget(target);
@@ -7566,10 +7633,10 @@ function activateSidebarToggleForProjectHome(state, target) {
 }
 
 function preserveProjectHomeAfterSidebarToggle(state) {
-  for (const delay of [0, 50, 150, 300]) {
+  for (const delay of [0, 50, 150, 300, 650]) {
     window.setTimeout(() => {
-      if (!state.current || !state.view || readProjectHomeFromUrl()) return;
-      replaceProjectHomeUrl(state.current.path, state.current.label);
+      if (!state.current || !state.view) return;
+      if (!readProjectHomeFromUrl()) replaceProjectHomeUrl(state.current.path, state.current.label);
       syncProjectHomeHost(state);
       syncHeaderForProjectHome(state);
     }, delay);
@@ -8147,6 +8214,8 @@ module.exports.__test = {
   buildProjectHomeKeyboardShortcuts,
   headerControlInteractionStyle,
   isNativeSidebarToggleLabel,
+  isNativePanelToggleLabel,
+  shouldRestoreHostBeforeNativePanelToggle,
   projectHomeRightOverlayInset,
   projectHomeBoardColumnMin,
 };
