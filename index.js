@@ -41,6 +41,7 @@ const SHORTCUTS_REGISTER_EVENT = "codexpp-keyboard-shortcuts-register";
 const SHORTCUTS_UNREGISTER_EVENT = "codexpp-keyboard-shortcuts-unregister";
 const SHORTCUTS_REFRESH_EVENT = "codexpp-keyboard-shortcuts-request-refresh";
 const QUICK_ACTIONS_SOURCE = "project-home";
+const RIGHT_PANEL_CLOSE_OPEN_DELAY_MS = 220;
 const RIGHT_PANEL_OVERLAY_SELECTOR = [
   '[data-app-shell-focus-area="right-panel"]',
   '[data-browser-sidebar-conversation-id]',
@@ -665,6 +666,7 @@ function startRenderer(self, api) {
     headerNode: null,
     headerSignature: "",
     forwardingSidebarToggle: false,
+    pendingOpenToken: 0,
     renderToken: 0,
     ignoreRouteUntil: 0,
     applyTimer: null,
@@ -2490,7 +2492,23 @@ function openProjectHomeFromButton(state, button) {
   openProjectHome(state, path, label);
 }
 
-function openProjectHome(state, path, label) {
+function openProjectHome(state, path, label, options = {}) {
+  if (!options.deferred) state.pendingOpenToken += 1;
+  if (!options.skipRightPanelPreflight) {
+    const delay = closeRightPanelBeforeProjectHomeOpen(state);
+    if (delay > 0) {
+      const token = state.pendingOpenToken;
+      state.api.log.info("[project-home] deferring open until right panel closes", { path, delay });
+      window.setTimeout(() => {
+        if (state.disposed || token !== state.pendingOpenToken) return;
+        openProjectHome(state, path, label, {
+          deferred: true,
+          skipRightPanelPreflight: true,
+        });
+      }, delay);
+      return;
+    }
+  }
   state.restoreTarget = captureRestoreTarget();
   state.current = { label, path };
   state.board = null;
@@ -2498,7 +2516,6 @@ function openProjectHome(state, path, label) {
   syncProjectHomeSidebarState(state);
   pushProjectHomeUrl(path, label);
   renderProjectHomeView(state);
-  autoCloseRightPanelForProjectHome(state);
   loadProjectHomeBoard(state, state.current);
   state.api.log.info("[project-home] opened", { path });
 }
@@ -6794,6 +6811,10 @@ function shouldAutoCloseRightPanelForProjectHome(input = {}) {
   return panelRects.some((rect) => rightPanelRectIsVisibleBesideHost(rect, host, viewportWidth));
 }
 
+function projectHomeOpenDelayAfterRightPanelClose(input = {}) {
+  return shouldAutoCloseRightPanelForProjectHome(input) ? RIGHT_PANEL_CLOSE_OPEN_DELAY_MS : 0;
+}
+
 function rightPanelRectIsVisibleBesideHost(rect, host, viewportWidth) {
   if (rect.width < 180 || rect.height < 80) return false;
   if (rect.right < viewportWidth - 32) return false;
@@ -7603,23 +7624,30 @@ function isNativeSidebarToggleLabel(label) {
   return value === "hide sidebar" || value === "show sidebar";
 }
 
-function autoCloseRightPanelForProjectHome(state) {
+function closeRightPanelBeforeProjectHomeOpen(state) {
   const host = routeContentHost();
-  if (!(host instanceof HTMLElement)) return false;
+  if (!(host instanceof HTMLElement)) return 0;
   const viewportWidth = window.innerWidth || document.documentElement?.clientWidth || 0;
-  const shouldClose = shouldAutoCloseRightPanelForProjectHome({
+  const delay = projectHomeOpenDelayAfterRightPanelClose({
     viewportWidth,
     hostRect: rectSnapshot(host.getBoundingClientRect()),
-    panelRects: rightPanelOverlayRects(state.view),
+    panelRects: rightPanelOverlayRects(null),
   });
-  if (!shouldClose) return false;
+  if (delay <= 0) return 0;
 
   const target = findNativeRightPanelToggleButton();
   if (!target) {
     state.api?.log?.info?.("[project-home] right panel overlay detected without toggle");
-    return false;
+    return 0;
   }
-  return activateNativePanelToggleForProjectHome(state, target);
+  state.ignoreRouteUntil = Date.now() + 1200;
+  state.forwardingSidebarToggle = true;
+  try {
+    activateNavigationTarget(target);
+  } finally {
+    state.forwardingSidebarToggle = false;
+  }
+  return delay;
 }
 
 function isNativePanelToggleLabel(label) {
@@ -8281,6 +8309,7 @@ module.exports.__test = {
   isNativePanelToggleLabel,
   shouldRestoreHostBeforeNativePanelToggle,
   shouldAutoCloseRightPanelForProjectHome,
+  projectHomeOpenDelayAfterRightPanelClose,
   projectHomeRightOverlayInset,
   projectHomeBoardColumnMin,
 };
