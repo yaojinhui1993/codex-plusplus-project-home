@@ -2498,6 +2498,7 @@ function openProjectHome(state, path, label) {
   syncProjectHomeSidebarState(state);
   pushProjectHomeUrl(path, label);
   renderProjectHomeView(state);
+  autoCloseRightPanelForProjectHome(state);
   loadProjectHomeBoard(state, state.current);
   state.api.log.info("[project-home] opened", { path });
 }
@@ -6784,6 +6785,24 @@ function projectHomeRightOverlayInset(input = {}) {
   return Math.max(0, Math.min(inset, maxInset));
 }
 
+function shouldAutoCloseRightPanelForProjectHome(input = {}) {
+  const viewportWidth = Math.max(0, Number(input.viewportWidth) || 0);
+  const host = rectSnapshot(input.hostRect || {});
+  const panelRects = Array.isArray(input.panelRects) ? input.panelRects.map(rectSnapshot) : [];
+  if (viewportWidth <= 0 || host.width <= 0 || host.height <= 0) return false;
+  if (projectHomeRightOverlayInset({ viewportWidth, hostRect: host, panelRects }) > 0) return true;
+  return panelRects.some((rect) => rightPanelRectIsVisibleBesideHost(rect, host, viewportWidth));
+}
+
+function rightPanelRectIsVisibleBesideHost(rect, host, viewportWidth) {
+  if (rect.width < 180 || rect.height < 80) return false;
+  if (rect.right < viewportWidth - 32) return false;
+  if (rect.left <= host.left + 240) return false;
+  const verticalOverlap = Math.min(rect.bottom, host.bottom) - Math.max(rect.top, host.top);
+  if (verticalOverlap < 80) return false;
+  return rect.left >= host.right - 16;
+}
+
 function rightPanelRectOverlaysHost(rect, host, viewportWidth) {
   if (rect.width < 180 || rect.height < 80) return false;
   if (rect.right < viewportWidth - 32) return false;
@@ -7535,6 +7554,32 @@ function findSidebarToggleButton() {
   }) || null;
 }
 
+function findNativeRightPanelToggleButton() {
+  const viewportWidth = window.innerWidth || document.documentElement?.clientWidth || 0;
+  const candidates = Array.from(document.querySelectorAll("button"))
+    .filter((button) => (
+      button instanceof HTMLButtonElement &&
+      visible(button) &&
+      !button.closest(`[${HEADER_ATTR}="root"],[${VIEW_ATTR}="root"]`)
+    ))
+    .map((button) => ({
+      button,
+      label: sidebarToggleLabelFor(button),
+      rect: rectSnapshot(button.getBoundingClientRect()),
+    }))
+    .filter((candidate) => shouldRestoreHostBeforeNativePanelToggle({
+      label: candidate.label,
+      rect: candidate.rect,
+      viewportWidth,
+    }))
+    .sort((a, b) => (
+      b.rect.right - a.rect.right ||
+      a.rect.top - b.rect.top ||
+      b.rect.width - a.rect.width
+    ));
+  return candidates[0]?.button || null;
+}
+
 function closestNativePanelToggleButton(target) {
   if (!(target instanceof Element)) return null;
   const button = target.closest("button");
@@ -7556,6 +7601,25 @@ function sidebarToggleLabelFor(button) {
 function isNativeSidebarToggleLabel(label) {
   const value = normalize(label);
   return value === "hide sidebar" || value === "show sidebar";
+}
+
+function autoCloseRightPanelForProjectHome(state) {
+  const host = routeContentHost();
+  if (!(host instanceof HTMLElement)) return false;
+  const viewportWidth = window.innerWidth || document.documentElement?.clientWidth || 0;
+  const shouldClose = shouldAutoCloseRightPanelForProjectHome({
+    viewportWidth,
+    hostRect: rectSnapshot(host.getBoundingClientRect()),
+    panelRects: rightPanelOverlayRects(state.view),
+  });
+  if (!shouldClose) return false;
+
+  const target = findNativeRightPanelToggleButton();
+  if (!target) {
+    state.api?.log?.info?.("[project-home] right panel overlay detected without toggle");
+    return false;
+  }
+  return activateNativePanelToggleForProjectHome(state, target);
 }
 
 function isNativePanelToggleLabel(label) {
@@ -8216,6 +8280,7 @@ module.exports.__test = {
   isNativeSidebarToggleLabel,
   isNativePanelToggleLabel,
   shouldRestoreHostBeforeNativePanelToggle,
+  shouldAutoCloseRightPanelForProjectHome,
   projectHomeRightOverlayInset,
   projectHomeBoardColumnMin,
 };
