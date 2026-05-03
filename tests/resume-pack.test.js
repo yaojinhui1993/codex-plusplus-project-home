@@ -289,6 +289,7 @@ test("native sidebar toggle labels are protected while Project Home is open", ()
 test("Project Home reserves space when the native right panel overlays the route host", () => {
   const helpers = projectHome.__test || {};
   assert.equal(typeof helpers.projectHomeRightOverlayInset, "function");
+  assert.equal(typeof helpers.projectHomeBoardColumnMin, "function");
 
   assert.equal(helpers.projectHomeRightOverlayInset({
     viewportWidth: 2048,
@@ -313,4 +314,22 @@ test("Project Home reserves space when the native right panel overlays the route
       { left: 1408, right: 2048, top: 0, bottom: 36, width: 640, height: 36 },
     ],
   }), 0);
+
+  assert.equal(helpers.projectHomeBoardColumnMin({
+    availableWidth: 1164,
+    columnCount: 5,
+    overlayInset: 884,
+  }), 232);
+
+  assert.equal(helpers.projectHomeBoardColumnMin({
+    availableWidth: 1660,
+    columnCount: 5,
+    overlayInset: 388,
+  }), 280);
+
+  assert.equal(helpers.projectHomeBoardColumnMin({
+    availableWidth: 820,
+    columnCount: 5,
+    overlayInset: 1228,
+  }), 200);
 });

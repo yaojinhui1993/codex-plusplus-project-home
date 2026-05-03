@@ -1025,7 +1025,7 @@ function installStyle() {
     [${VIEW_ATTR}="board"] {
       display: grid;
       grid-auto-flow: column;
-      grid-auto-columns: minmax(280px, 1fr);
+      grid-auto-columns: minmax(var(--project-home-board-column-min, 280px), 1fr);
       grid-template-columns: unset;
       gap: 0;
       height: 100%;
@@ -6715,12 +6715,17 @@ function syncProjectHomeRightOverlayInset(state) {
   const root = state.view;
   const host = state.host instanceof HTMLElement ? state.host : routeContentHost();
   if (!(root instanceof HTMLElement) || !(host instanceof HTMLElement)) return;
+  const viewportWidth = window.innerWidth || document.documentElement?.clientWidth || 0;
+  const hostRect = rectSnapshot(host.getBoundingClientRect());
   const inset = projectHomeRightOverlayInset({
-    viewportWidth: window.innerWidth || document.documentElement?.clientWidth || 0,
-    hostRect: rectSnapshot(host.getBoundingClientRect()),
+    viewportWidth,
+    hostRect,
     panelRects: rightPanelOverlayRects(root),
   });
-  applyProjectHomeRightOverlayInset(root, inset);
+  applyProjectHomeRightOverlayInset(root, inset, {
+    availableWidth: Math.max(0, hostRect.width - inset),
+    columnCount: visibleIssueColumns(state).length || ISSUE_COLUMNS.length,
+  });
 }
 
 function rightPanelOverlayRects(projectRoot) {
@@ -6789,14 +6794,33 @@ function rightPanelRectOverlaysHost(rect, host, viewportWidth) {
   return rect.left > host.left + 240;
 }
 
-function applyProjectHomeRightOverlayInset(root, inset) {
+function projectHomeBoardColumnMin(input = {}) {
+  const overlayInset = Math.max(0, Number(input.overlayInset) || 0);
+  const availableWidth = Math.max(0, Number(input.availableWidth) || 0);
+  const columnCount = Math.max(1, Math.floor(Number(input.columnCount) || 1));
+  if (overlayInset <= 0 || availableWidth <= 0) return 280;
+  const perColumn = Math.floor(availableWidth / columnCount);
+  if (perColumn >= 280) return 280;
+  return Math.max(200, Math.min(280, perColumn));
+}
+
+function applyProjectHomeRightOverlayInset(root, inset, layout = {}) {
   const value = Math.max(0, Math.round(Number(inset) || 0));
   if (value > 0) {
     root.style.setProperty("--project-home-right-overlay-inset", `${value}px`);
-    root.style.marginRight = "var(--project-home-right-overlay-inset)";
+    root.style.width = "calc(100% - var(--project-home-right-overlay-inset))";
+    root.style.maxWidth = "calc(100% - var(--project-home-right-overlay-inset))";
+    root.style.setProperty("--project-home-board-column-min", `${projectHomeBoardColumnMin({
+      ...layout,
+      overlayInset: value,
+    })}px`);
+    root.dataset.rightPanelOverlay = "true";
   } else {
     root.style.removeProperty("--project-home-right-overlay-inset");
-    root.style.marginRight = "";
+    root.style.removeProperty("--project-home-board-column-min");
+    root.style.width = "";
+    root.style.maxWidth = "";
+    delete root.dataset.rightPanelOverlay;
   }
 }
 
@@ -8124,4 +8148,5 @@ module.exports.__test = {
   headerControlInteractionStyle,
   isNativeSidebarToggleLabel,
   projectHomeRightOverlayInset,
+  projectHomeBoardColumnMin,
 };
